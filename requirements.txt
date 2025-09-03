@@ -3,3 +3,8 @@ hypercorn==0.14.4
 pandas
 filelock
 google-generativeai
+
+beautifulsoup4
+google-genai
+numpy>=1.20
+pydantic>=1.8
