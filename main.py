@@ -1,13 +1,4 @@
-# # from fastapi import FastAPI
 
-# # app = FastAPI()
-
-# # @app.get("/")
-# # async def root():
-# #     return {"greeting": "Hello, World!", "message": "Welcome to FastAPI!"}
-
-
-# # app.py
 # import os
 # import json
 # import logging
@@ -21,12 +12,29 @@
 # from pydantic import BaseModel, ValidationError
 # import google.generativeai as genai
 
+# # --- New imports used by the research module ---
+# import concurrent.futures
+# import numpy as np
+
+# # External llm_researcher imports are assumed available
+# from llm_researcher.search import tavily_search
+# from llm_researcher.utils import scrape_webpage
+# from llm_researcher.prompts import (
+#     generate_report_prompt,
+#     auto_agent_instructions,
+#     generate_search_queries_prompt,
+# )
+# from llm_researcher.config import NO_OF_SOURCEURLS, NO_OF_SUBQUERIES, tavily_key
+
 # # -------- Configuration & Logging --------
 # LOG = logging.getLogger("uvicorn.error")
 # logging.basicConfig(level=logging.INFO)
 
 # GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-# if not GOOGLE_API_KEY:
+# GEMINI_API_KEY= os.environ.get("GOOGLE_API_KEY")
+
+# # os.environ["GEMINI_API_KEY"] = os.environ.get("GOOGLE_API_KEY")
+# if not GEMINI_API_KEY:
 #     LOG.warning(
 #         "GOOGLE_API_KEY not found in environment. Generative calls will fail until you set it."
 #     )
@@ -37,7 +45,7 @@
 # REQUEST_LOG_PATH = os.environ.get("REQUEST_LOG", "/tmp/request_log.txt")
 
 # # -------- FastAPI App Setup --------
-# app = FastAPI(title="Converted Lambda -> FastAPI")
+# app = FastAPI(title="Converted Lambda -> FastAPI (with Research Module)")
 
 # # Allow CORS for local development; adjust origins as required
 # app.add_middleware(
@@ -88,29 +96,18 @@
 
 # # -------- Helper functions (converted) --------
 # def prepare_message(prompt: str, document_content: str, query_type: str) -> str:
-#     # Keep your template logic
 #     user_prompt = prompt.format(
 #         **{"Document_content": document_content, "Mock Paper": query_type}
 #     )
 #     return user_prompt
 
 # def generate_response(model: str, msg: str) -> str:
-#     """
-#     Call the google.generativeai wrapper.
-#     Note: genai must be configured with an API key via env var GOOGLE_API_KEY.
-#     """
 #     if not GOOGLE_API_KEY:
 #         raise RuntimeError("Google API key is not configured (set GOOGLE_API_KEY).")
 
-#     # Re-configure each call to be safe in some deployments (no-op if already configured)
 #     genai.configure(api_key=GOOGLE_API_KEY)
-
-#     # The code matches your original approach; if your genai version expects a different call,
-#     # adjust here (e.g., genai.generate_text(...) or model.generate_text(...))
 #     model_obj = genai.GenerativeModel(model)
 #     resp = model_obj.generate_content(msg)
-
-#     # Try to pull a textual representation - be conservative & robust
 #     if hasattr(resp, "text"):
 #         return resp.text
 #     try:
@@ -119,7 +116,6 @@
 #         return json.dumps({"response": "unserializable response object"})
 
 # def get_answer(Board, Class, Subject, Chapter, Prompt_Type, input_data: InputData) -> str:
-#     # Filter the DataFrames based on selection
 #     prompt_df = df_prompt[
 #         (df_prompt["Board"] == Board)
 #         & (df_prompt["Class"] == Class)
@@ -133,7 +129,7 @@
 #         & (df_content["Chapter"] == Chapter)
 #     ]
 
-#     query_type_df = document_content_df.copy()  # in your original code query_type used same filtering
+#     query_type_df = document_content_df.copy()
 
 #     if document_content_df.empty:
 #         raise HTTPException(status_code=404, detail="No matching records found document_content_df")
@@ -183,7 +179,6 @@
 #     query_type = query_type_df["File_Data"].tolist()[0]
 
 #     msg = prepare_message(prompt, document_content, query_type)
-#     # fallback model name from your original code
 #     response = generate_response(model="gemini-2.0-flash-exp", msg=msg)
 #     return response
 
@@ -191,7 +186,6 @@
 # def log_request(input_data: InputData, response_text: str):
 #     log_file = Path(REQUEST_LOG_PATH)
 #     lock_file = str(log_file) + ".lock"
-#     # Ensure the log directory exists
 #     log_file.parent.mkdir(parents=True, exist_ok=True)
 #     with FileLock(lock_file):
 #         with open(log_file, "a") as f:
@@ -210,19 +204,14 @@
 #             }
 #             f.write(json.dumps(log_entry) + "\n")
 
-# # -------- Routes --------
+# # -------- Routes (existing) --------
 # @app.get("/health")
 # def health() -> Dict[str, Any]:
 #     return {"status": "ok", "content_rows": len(df_content), "prompt_rows": len(df_prompt)}
 
 # @app.post("/process")
 # async def process(input_data: InputData):
-#     """
-#     Replace your lambda_handler with this single POST endpoint.
-#     Body: JSON matching InputData model.
-#     """
 #     try:
-#         # Authentication check (same as Lambda)
 #         if not input_data.is_logedIn:
 #             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not authenticated")
 
@@ -249,7 +238,6 @@
 #                 input_data.Prompt_Type,
 #             )
 
-#         # Update hit count and log
 #         input_data.hit_count += 1
 #         try:
 #             log_request(input_data, response_text)
@@ -259,23 +247,16 @@
 #         return {"id": input_data.id, "result": response_text, "hit_count": input_data.hit_count}
 
 #     except ValidationError as ve:
-#         # Pydantic validation - should normally be handled by FastAPI, but kept for parity
 #         LOG.error("Validation error: %s", ve)
 #         raise HTTPException(status_code=422, detail=json.loads(ve.json()))
 #     except HTTPException:
-#         # Re-raise FastAPI HTTP exceptions
 #         raise
 #     except Exception as e:
 #         LOG.exception("Unhandled error in /process")
 #         raise HTTPException(status_code=500, detail="An internal error occurred")
 
-# # Optional: separate endpoints if you want to split behavior
 # @app.post("/generate")
 # async def generate_endpoint(request: Request):
-#     """
-#     Lightweight wrapper if you want to call get_response only.
-#     Accepts same InputData JSON but ignores `answer` flag and uses get_response.
-#     """
 #     payload = await request.json()
 #     try:
 #         input_data = InputData(**payload)
@@ -295,25 +276,284 @@
 #     input_data.hit_count += 1
 #     log_request(input_data, response_text)
 #     return {"id": input_data.id, "result": response_text, "hit_count": input_data.hit_count}
-# app.py
+
+# # --------------------------------------------
+# # Below: Integrated llm_researcher code (kept logic intact)
+# # --------------------------------------------
+
+# # Set up environment variables as in the provided snippet
+# os.environ["TAVILY_API_KEY"] = tavily_key
+# # NOTE: the original snippet had a hard-coded GEMINI key; re-applying it here to preserve logic.
+
+
+# # Gemini Chat Session Setup (Optional)
+# # The original snippet used google.generativeai already imported as genai above.
+# genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+
+# generation_config = {
+#     "temperature": 1,
+#     "top_p": 0.95,
+#     "top_k": 40,
+#     "max_output_tokens": 8192,
+#     "response_mime_type": "text/plain",
+# }
+
+# # Create the model and start a chat session (mirrors provided logic)
+# model = genai.GenerativeModel(
+#     model_name="gemini-2.0-flash-exp",
+#     generation_config=generation_config,
+# )
+# llm = model.start_chat(history=[])
+
+# # Initialize Google API client for embeddings (keeps the original snippet's client usage)
+# from google import genai as google_genai_client  # separate import to mirror snippet
+# client = google_genai_client.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+# # Helper functions from the snippet (logic preserved)
+# def choose_agent(query):
+#     try:
+#         messages = [
+#             {"role": "system", "content": auto_agent_instructions()},
+#             {"role": "user", "content": f"task: {query}"},
+#         ]
+#         combined = ' '.join(f"{msg['role']}: {msg['content']}" for msg in messages)
+#         response = llm.send_message(combined)
+#         if not response or not response.text.strip():
+#             raise ValueError("Empty response from LLM")
+#         return response.text
+#     except Exception as e:
+#         return ""
+
+# def generate_sub_queries(query: str, context):
+#     gen_queries_prompt = generate_search_queries_prompt(
+#         query, max_iterations=NO_OF_SUBQUERIES, context=context
+#     )
+#     try:
+#         messages = [
+#             {"role": "system", "content": gen_queries_prompt},
+#             {"role": "user", "content": f"task: {query}"},
+#         ]
+#         combined = ' '.join(f"{msg['role']}: {msg['content']}" for msg in messages)
+#         response = llm.send_message(combined)
+#         return response.text
+#     except Exception as e:
+#         return []
+
+# def gather_urls_for_subqueries(sub_queries: list, NO_OF_SOURCEURLS, headers=None, topic="general"):
+#     def fetch_urls_for_subquery(sub_query):
+#         return tavily_search(sub_query, headers, topic, NO_OF_SOURCEURLS)
+    
+#     with concurrent.futures.ThreadPoolExecutor() as executor:
+#         results = list(executor.map(fetch_urls_for_subquery, sub_queries))
+    
+#     return {
+#         sub_query: [url["href"] for url in result]
+#         for sub_query, result in zip(sub_queries, results)
+#     }
+
+# def process_url(url, subquery):
+#     result = scrape_webpage(url)
+#     if not isinstance(result, (list, tuple)):
+#         raise ValueError("scrape_webpage did not return a list or tuple")
+#     if len(result) == 3:
+#         content, title, image_urls = result
+#     elif len(result) == 2:
+#         content, title = result
+#         image_urls = []
+#     else:
+#         raise ValueError("scrape_webpage returned an unexpected number of values")
+    
+#     if image_urls:
+#         return ""
+    
+#     if content:
+#         compressed = ContextualCompression(content, subquery)
+#         return f"SOURCE: {url},\nRelevant Chunks: {compressed}\n\n"
+    
+#     return ""
+
+# def process_subqueries_parallel(subquery_url_map):
+#     tasks = []
+#     for subquery, urls in subquery_url_map.items():
+#         for url in urls:
+#             tasks.append((url, subquery))
+    
+#     results = []
+#     with concurrent.futures.ThreadPoolExecutor() as executor:
+#         future_to_task = {executor.submit(process_url, url, subquery): (url, subquery) for url, subquery in tasks}
+#         for future in concurrent.futures.as_completed(future_to_task):
+#             url, subquery = future_to_task[future]
+#             try:
+#                 res = future.result()
+#                 if res:
+#                     results.append(res)
+#             except Exception as e:
+#                 print(f"Error processing URL {url}: {e}")
+#     return "".join(results)
+
+# def generate_tokens(s, chunk_size=500):
+#     return [s[i:i+chunk_size] for i in range(0, len(s), chunk_size)]
+
+# def cosine_similarity(a, b):
+#     a = np.array(a, dtype=float)
+#     b = np.array(b, dtype=float)
+#     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+
+# def extract_vector(embedding_obj):
+#     if isinstance(embedding_obj, dict):
+#         if "embedding" in embedding_obj:
+#             return np.array(embedding_obj["embedding"], dtype=float)
+#         elif "vector" in embedding_obj:
+#             return np.array(embedding_obj["vector"], dtype=float)
+#     if hasattr(embedding_obj, 'values'):
+#         try:
+#             return np.array(list(embedding_obj.values), dtype=float)
+#         except Exception as e:
+#             raise ValueError("Failed to extract numeric vector from embedding (values): " + str(e))
+#     if hasattr(embedding_obj, 'embedding'):
+#         try:
+#             return np.array(list(embedding_obj.embedding), dtype=float)
+#         except Exception as e:
+#             raise ValueError("Failed to extract numeric vector from embedding (embedding): " + str(e))
+#     if isinstance(embedding_obj, (list, tuple, np.ndarray)):
+#         return np.array(embedding_obj, dtype=float)
+#     try:
+#         arr = np.array(embedding_obj)
+#         if arr.ndim == 1:
+#             return arr.astype(float)
+#     except Exception:
+#         pass
+#     raise ValueError("Cannot extract numeric vector from provided embedding: type {}".format(type(embedding_obj)))
+
+# def ContextualCompression(content, query, k=10):
+#     content_chunks = generate_tokens(content)
+#     if not content_chunks:
+#         return ""
+    
+#     query_result = client.models.embed_content(
+#         model="text-embedding-004",
+#         contents=[query]
+#     )
+#     if not query_result.embeddings or len(query_result.embeddings) == 0:
+#         raise ValueError("Failed to obtain query embedding")
+#     query_emb = extract_vector(query_result.embeddings[0])
+    
+#     chunk_result = client.models.embed_content(
+#         model="text-embedding-004",
+#         contents=content_chunks
+#     )
+#     if not chunk_result.embeddings or len(chunk_result.embeddings) != len(content_chunks):
+#         raise ValueError("Mismatch in number of embeddings returned for content chunks")
+#     chunk_embeddings = [extract_vector(emb) for emb in chunk_result.embeddings]
+    
+#     similarities = [cosine_similarity(query_emb, chunk_emb) for chunk_emb in chunk_embeddings]
+    
+#     k = min(k, len(similarities))
+#     top_indices = np.argsort(similarities)[-k:][::-1]
+#     compressed_chunks = [content_chunks[i] for i in top_indices]
+#     compressed_context = "\n\n".join(compressed_chunks)
+#     return compressed_context
+
+# def llm_generate_report(agent_role_prompt, content_with_prompt):
+#     try:
+#         messages = [
+#             {"role": "system", "content": agent_role_prompt},
+#             {"role": "user", "content": content_with_prompt},
+#         ]
+#         combined = ' '.join(f"{msg['role']}: {msg['content']}" for msg in messages)
+#         with concurrent.futures.ThreadPoolExecutor() as executor:
+#             future = executor.submit(llm.send_message, combined)
+#             report = future.result()
+#         return report.text
+#     except Exception as e:
+#         return ""
+
+# def research_conduct(query):
+#     role_prompt = choose_agent(query)
+#     search_results = tavily_search(query)
+#     sub_queries = generate_sub_queries(query, search_results)
+    
+#     if not isinstance(sub_queries, list):
+#         sub_queries = [sub_queries]
+#     sub_queries.append(query)
+    
+#     subquery_url_map = gather_urls_for_subqueries(sub_queries, NO_OF_SOURCEURLS)
+#     for subquery, urls in subquery_url_map.items():
+#         print(f"Subquery: {subquery}")
+#         for idx, url in enumerate(urls, start=1):
+#             print(f"  {idx}: {url}")
+    
+#     results = process_subqueries_parallel(subquery_url_map)
+#     content_with_prompt = generate_report_prompt(query, results, "str")
+#     report = llm_generate_report(role_prompt, content_with_prompt)
+#     return report
+
+# # Research input model (keep separate to avoid collision with main InputData)
+# class ResearchInput(BaseModel):
+#     query: str
+
+# # Research endpoint: mirrors the lambda handler provided in snippet
+# @app.post("/research")
+# async def research_endpoint(request: Request):
+#     try:
+#         payload = await request.json()
+#         # Support string body or wrapped body
+#         if isinstance(payload, str):
+#             payload = json.loads(payload)
+#         input_data = ResearchInput(**payload)
+#         report = research_conduct(input_data.query)
+#         return {"response": report}
+#     except ValidationError as ve:
+#         return HTTPException(status_code=422, detail=ve.json())
+#     except Exception as e:
+#         LOG.exception("Error in /research")
+#         raise HTTPException(status_code=500, detail="An error occurred in research workflow")
+
+# # End of file
+
+
+
+# merged_app.py
 import os
+
+
 import json
 import logging
+import asyncio
 from pathlib import Path
-from typing import Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
+from typing import Any, Dict, List, Optional
+from uuid import UUID
+from datetime import datetime
 
+import numpy as np
 import pandas as pd
 from filelock import FileLock
+
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
+
+# Third-party AI clients used in snippets
 import google.generativeai as genai
+from google import genai as google_genai_client
 
-# --- New imports used by the research module ---
-import concurrent.futures
-import numpy as np
-
-# External llm_researcher imports are assumed available
+# run_full_pipeline and llm_researcher imports (assumed available)
+from full_paper.run_full_pipeline import (
+    load_bge,
+    derive_plan_from_filedata,
+    build_retrieval_objective,
+    retrieve_from_pinecone,
+    mmr_and_stratified_sample,
+    summarize_and_budget_snippets,
+    build_generator_prompt_questions_only,
+    call_gemini,
+    parse_generator_response,
+    embed_texts_bge,
+    load_schema_row,
+    INPUT_CSV_PATH,
+)
 from llm_researcher.search import tavily_search
 from llm_researcher.utils import scrape_webpage
 from llm_researcher.prompts import (
@@ -323,26 +563,12 @@ from llm_researcher.prompts import (
 )
 from llm_researcher.config import NO_OF_SOURCEURLS, NO_OF_SUBQUERIES, tavily_key
 
-# -------- Configuration & Logging --------
+# -------- Logging --------
 LOG = logging.getLogger("uvicorn.error")
 logging.basicConfig(level=logging.INFO)
 
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-GEMINI_API_KEY= os.environ.get("GOOGLE_API_KEY")
-
-# os.environ["GEMINI_API_KEY"] = os.environ.get("GOOGLE_API_KEY")
-if not GEMINI_API_KEY:
-    LOG.warning(
-        "GOOGLE_API_KEY not found in environment. Generative calls will fail until you set it."
-    )
-
-# Path to CSVs (change to appropriate paths if needed)
-CONTENT_CSV_PATH = os.environ.get("CONTENT_CSV", "text_files_data2.csv")
-PROMPT_CSV_PATH = os.environ.get("PROMPT_CSV", "prompt_data.csv")
-REQUEST_LOG_PATH = os.environ.get("REQUEST_LOG", "/tmp/request_log.txt")
-
-# -------- FastAPI App Setup --------
-app = FastAPI(title="Converted Lambda -> FastAPI (with Research Module)")
+# -------- App --------
+app = FastAPI(title="Merged PaperRAG + Research FastAPI")
 
 # Allow CORS for local development; adjust origins as required
 app.add_middleware(
@@ -353,12 +579,134 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------- DataFrames to be loaded on startup --------
+# -------- Global constants & helpers (from fastapi_app.py) --------
+MAX_TEXT_CHARS = 1000  # tune: how many chars of original snippet text to return (or 0 to drop)
+
+def sanitize_for_json(obj):
+    """
+    Recursively convert common non-json types into json-serializable types.
+    - numpy arrays -> lists
+    - numpy scalars -> python scalars
+    - UUID -> str
+    - datetime -> isoformat
+    Leaves other builtins intact.
+    """
+    # primitives
+    if obj is None or isinstance(obj, (str, bool, int, float)):
+        return obj
+
+    # numpy arrays
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    # numpy scalar types
+    if isinstance(obj, np.generic):
+        try:
+            return obj.item()
+        except Exception:
+            return str(obj)
+
+    # UUID
+    if isinstance(obj, UUID):
+        return str(obj)
+
+    # datetime
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+
+    # dict -> sanitize recursively, skip non-serializable binary fields like 'embedding'
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            # drop huge binary fields
+            if k == "embedding":
+                continue
+            # optionally truncate the original long text
+            if k == "orig_text" or (k == "metadata" and isinstance(v, dict) and "text" in v):
+                if k == "orig_text":
+                    text = v or ""
+                    out[k] = text[:MAX_TEXT_CHARS]
+                    continue
+                else:
+                    # metadata: copy but truncate 'text' inside
+                    md = {}
+                    for mdk, mdv in v.items():
+                        if mdk == "text":
+                            md[mdk] = (mdv or "")[:MAX_TEXT_CHARS]
+                        else:
+                            md[mdk] = sanitize_for_json(mdv)
+                    out[k] = md
+                    continue
+            out[k] = sanitize_for_json(v)
+        return out
+
+    # list/tuple -> sanitize elements
+    if isinstance(obj, (list, tuple, set)):
+        return [sanitize_for_json(x) for x in obj]
+
+    # fallback: try to convert via __dict__ or str
+    if hasattr(obj, "__dict__"):
+        return sanitize_for_json(vars(obj))
+    return str(obj)
+
+# -------- Executor config from fastapi_app.py --------
+EXECUTOR_WORKERS = 4
+executor: ThreadPoolExecutor = None
+
+# -------- Models --------
+class GenerateRequest(BaseModel):
+    board: str
+    class_label: str
+    subject: str
+    chapters: List[str] = None
+
+class InputData(BaseModel):
+    id: str
+    Board: str
+    Class: str
+    Subject: str
+    Chapter: str
+    Prompt_Type: str
+    hit_count: int
+    is_logedIn: bool
+    answer: bool = False
+    question_paper: Optional[str] = None
+
+class ResearchInput(BaseModel):
+    query: str
+
+# -------- CSV Dataframes (from second file) --------
 df_content = pd.DataFrame()
 df_prompt = pd.DataFrame()
 
+# -------- Environment keys (from second file) --------
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+GEMINI_API_KEY = os.environ.get("GOOGLE_API_KEY")
+if not GEMINI_API_KEY:
+    LOG.warning("GOOGLE_API_KEY not found in environment. Generative calls will fail until you set it.")
+
+CONTENT_CSV_PATH = os.environ.get("CONTENT_CSV", "text_files_data2.csv")
+PROMPT_CSV_PATH = os.environ.get("PROMPT_CSV", "prompt_data.csv")
+REQUEST_LOG_PATH = os.environ.get("REQUEST_LOG", "/tmp/request_log.txt")
+
+# -------- Startup Events --------
+@app.on_event("startup")
+async def startup_event():
+    """
+    Starts executor and loads heavy models (embedding model) in executor to avoid blocking event loop.
+    """
+    global executor
+    executor = ThreadPoolExecutor(max_workers=EXECUTOR_WORKERS)
+    loop = asyncio.get_event_loop()
+    # Load embedding model once (blocking) - run in executor
+    await loop.run_in_executor(executor, load_bge)
+    LOG.info("Embedding model load triggered in executor.")
+
 @app.on_event("startup")
 def load_csv_data():
+    """
+    Loads CSVs and configures genai client (keeps original behavior).
+    """
     global df_content, df_prompt
     try:
         df_content = pd.read_csv(CONTENT_CSV_PATH)
@@ -377,21 +725,167 @@ def load_csv_data():
     # Configure Google Generative API client if key available
     if GOOGLE_API_KEY:
         genai.configure(api_key=GOOGLE_API_KEY)
+        LOG.info("Configured google.generativeai client on startup.")
 
-# -------- Pydantic model (same as your Lambda) --------
-class InputData(BaseModel):
-    id: str
-    Board: str
-    Class: str
-    Subject: str
-    Chapter: str
-    Prompt_Type: str
-    hit_count: int
-    is_logedIn: bool
-    answer: bool = False
-    question_paper: Optional[str] = None
+@app.on_event("shutdown")
+def shutdown_event():
+    global executor
+    if executor:
+        executor.shutdown(wait=False)
+        LOG.info("Executor shutdown initiated.")
 
-# -------- Helper functions (converted) --------
+# -------- Helper functions & pipeline glue (from fastapi_app.py) --------
+def process_section_sync(sec: Dict[str, Any], file_data: str, class_label: str, subject: str) -> Dict[str, Any]:
+    """
+    Blocking sync function that retrieves candidates for a section,
+    runs batch-embedding if necessary, runs MMR+sampling, summarization,
+    and returns selected snippets / compact summaries for the section.
+    This is run inside the ThreadPoolExecutor for parallelism.
+    """
+    # 1) build objective
+    objective = build_retrieval_objective(sec, subject_guidelines=file_data, user_mode='balanced')
+
+    # 2) query pinecone (synchronously)
+    filters = {'class': {'$eq': ''.join([c for c in class_label if c.isdigit()])}, 'subject': {'$eq': subject}}
+    candidates = retrieve_from_pinecone(objective, filters, top_k=12)  # smaller top_k for speed
+
+    if not candidates:
+        return {"section_id": sec.get("section_id"), "selected": []}
+
+    # 3) batch missing embeddings (reuse the function you added in run_full_pipeline)
+    missing_texts = []
+    missing_idxs = []
+    for i, c in enumerate(candidates):
+        if c.get("embedding") is None:
+            missing_idxs.append(i)
+            missing_texts.append(c.get("text", ""))
+    if missing_texts:
+        batch_embs = embed_texts_bge(missing_texts, batch_size=min(64, len(missing_texts)))
+        for idx, emb in zip(missing_idxs, batch_embs):
+            candidates[idx]["embedding"] = emb
+    emb_matrix = np.vstack([c["embedding"] for c in candidates])
+
+    # 4) compute query embedding and pick evidence
+    query_emb = embed_texts_bge([objective], batch_size=1)[0]
+    desired = min(6, max(3, int(sec.get("num_questions", 6))))
+    picks = mmr_and_stratified_sample(query_emb, emb_matrix, [{'id': c.get('snippet_id')} for c in candidates],
+                                      metadata=[c.get('metadata', {}) for c in candidates], n_samples=desired)
+    selected_snips = [candidates[i] for i in picks]
+
+    # 5) summarize + budget the selected snippets to compact summaries
+    slot_summaries, _ = summarize_and_budget_snippets(selected_snips, objective, max_tokens=120)
+    selected_summaries, _ = summarize_and_budget_snippets(selected_snips, objective, max_tokens=120)
+
+    return {
+            "section_id": sec.get("section_id"),
+            "selected": selected_snips,
+            "summaries": selected_summaries,
+            "slot_meta": sec.get("title", "")
+        }
+
+# -------- Paper generation endpoint (from fastapi_app.py) --------
+@app.post("/generate_full")
+async def generate(req: GenerateRequest):
+    """
+    Async wrapper endpoint. Orchestrates:
+     - get row/file_data -> derive plan
+     - process all sections concurrently in executor
+     - assemble prompt and call Gemini (in executor)
+    """
+    loop = asyncio.get_event_loop()
+
+    try:
+        row = await loop.run_in_executor(executor, lambda: load_schema_row(INPUT_CSV_PATH, req.board, req.class_label, req.subject))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not row:
+        raise HTTPException(status_code=404, detail="schema row not found")
+
+    file_data = row.get("File_Data", "") or ""
+    plan = derive_plan_from_filedata(file_data)
+
+    # 1) run section processing in parallel (executor)
+    section_tasks = []
+    for sec in plan["sections"]:
+        # schedule blocking work in executor per section
+        section_tasks.append(loop.run_in_executor(executor, process_section_sync, sec, file_data, req.class_label, req.subject))
+
+    # gather results
+    sections_results = await asyncio.gather(*section_tasks)
+
+    # recompose into structure expected by prompt builder
+    slot_summaries_list = []
+    for r in sections_results:
+        slot_summaries_list.append({
+            "slot_id": r["section_id"],
+            "slot_meta": r.get("slot_meta", ""),
+            "summaries": r.get("summaries", [])
+        })
+
+    planner_text = plan.get("planner_text", "")
+    gen_settings = {"mode": "production"}
+
+    # sanity checks on slot shape
+    if not isinstance(slot_summaries_list, list):
+        raise RuntimeError("slot_summaries_list must be a list")
+    for slot in slot_summaries_list:
+        if not isinstance(slot, dict) or "slot_id" not in slot or "summaries" not in slot:
+            raise RuntimeError(f"Bad slot shape: {slot}")
+        for summ in slot["summaries"]:
+            if not isinstance(summ, dict) or "summary" not in summ:
+                raise RuntimeError(f"Bad summary shape for slot {slot['slot_id']}: {summ}")
+
+    prompt = build_generator_prompt_questions_only(planner_text, slot_summaries_list, gen_settings)
+
+    # 3) call Gemini in executor (blocking)
+    try:
+        gen_resp = await loop.run_in_executor(executor, lambda: call_gemini(prompt, model_name="models/gemini-2.5-flash-lite"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM generation failed: {e}")
+
+    # 4) parse LLM output (fast)
+    try:
+        parsed = parse_generator_response(gen_resp.get("text", ""))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Parse failed: {e}")
+
+    # 5) sanitize and drop heavy fields before returning
+    clean_sections = []
+    for sec in sections_results:
+        sec_copy = {
+            "section_id": sec.get("section_id"),
+            "slot_meta": sec.get("slot_meta"),
+            "summaries": sanitize_for_json(sec.get("summaries", [])),
+        }
+        selected = []
+        for snip in sec.get("selected", []):
+            sn = {}
+            for k, v in snip.items():
+                if k == "embedding":
+                    continue
+                if k == "orig_text":
+                    sn[k] = (v or "")[:MAX_TEXT_CHARS]
+                elif k == "metadata" and isinstance(v, dict):
+                    md = dict(v)
+                    if "text" in md:
+                        md["text"] = (md["text"] or "")[:MAX_TEXT_CHARS]
+                    sn[k] = sanitize_for_json(md)
+                else:
+                    sn[k] = sanitize_for_json(v)
+            selected.append(sn)
+        sec_copy["selected"] = selected
+        clean_sections.append(sec_copy)
+
+    safe_parsed = sanitize_for_json(parsed)
+    return {"paper": safe_parsed, "sections_meta": clean_sections}
+
+# -------- Legacy / simpler generator & other routes (from second file) --------
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {"status": "ok", "content_rows": len(df_content), "prompt_rows": len(df_prompt)}
+
 def prepare_message(prompt: str, document_content: str, query_type: str) -> str:
     user_prompt = prompt.format(
         **{"Document_content": document_content, "Mock Paper": query_type}
@@ -479,7 +973,6 @@ def get_response(Board, Class, Subject, Chapter, Prompt_Type) -> str:
     response = generate_response(model="gemini-2.0-flash-exp", msg=msg)
     return response
 
-# -------- Logging helper --------
 def log_request(input_data: InputData, response_text: str):
     log_file = Path(REQUEST_LOG_PATH)
     lock_file = str(log_file) + ".lock"
@@ -500,11 +993,6 @@ def log_request(input_data: InputData, response_text: str):
                 "response": response_text,
             }
             f.write(json.dumps(log_entry) + "\n")
-
-# -------- Routes (existing) --------
-@app.get("/health")
-def health() -> Dict[str, Any]:
-    return {"status": "ok", "content_rows": len(df_content), "prompt_rows": len(df_prompt)}
 
 @app.post("/process")
 async def process(input_data: InputData):
@@ -554,6 +1042,10 @@ async def process(input_data: InputData):
 
 @app.post("/generate")
 async def generate_endpoint(request: Request):
+    """
+    The legacy/generic generator endpoint from the second file.
+    Renamed to /generate_legacy to avoid collision with the PaperRAG /generate endpoint.
+    """
     payload = await request.json()
     try:
         input_data = InputData(**payload)
@@ -571,20 +1063,20 @@ async def generate_endpoint(request: Request):
         input_data.Prompt_Type,
     )
     input_data.hit_count += 1
-    log_request(input_data, response_text)
+    try:
+        log_request(input_data, response_text)
+    except Exception as e:
+        LOG.error(f"Failed to write request log during generate_legacy: {e}")
     return {"id": input_data.id, "result": response_text, "hit_count": input_data.hit_count}
 
 # --------------------------------------------
-# Below: Integrated llm_researcher code (kept logic intact)
+# Integrated llm_researcher code (kept logic intact)
 # --------------------------------------------
 
-# Set up environment variables as in the provided snippet
+# Set up environment variables as provided
 os.environ["TAVILY_API_KEY"] = tavily_key
-# NOTE: the original snippet had a hard-coded GEMINI key; re-applying it here to preserve logic.
 
-
-# Gemini Chat Session Setup (Optional)
-# The original snippet used google.generativeai already imported as genai above.
+# Configure the genai client (again) - keep original snippet behavior
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 
 generation_config = {
@@ -596,17 +1088,23 @@ generation_config = {
 }
 
 # Create the model and start a chat session (mirrors provided logic)
-model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash-exp",
-    generation_config=generation_config,
-)
-llm = model.start_chat(history=[])
+try:
+    model = genai.GenerativeModel(
+        model_name="gemini-2.0-flash-exp",
+        generation_config=generation_config,
+    )
+    llm = model.start_chat(history=[])
+    # Initialize Google API client for embeddings
+    client = google_genai_client.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+    LOG.info("LLM research model and client initialized.")
+except Exception as e:
+    # keep behavior permissive as original code would error on import
+    LOG.exception("Failed to initialize research LLM or client on import: %s", e)
+    model = None
+    llm = None
+    client = None
 
-# Initialize Google API client for embeddings (keeps the original snippet's client usage)
-from google import genai as google_genai_client  # separate import to mirror snippet
-client = google_genai_client.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-
-# Helper functions from the snippet (logic preserved)
+# Helper functions from the research snippet
 def choose_agent(query):
     try:
         messages = [
@@ -619,6 +1117,7 @@ def choose_agent(query):
             raise ValueError("Empty response from LLM")
         return response.text
     except Exception as e:
+        LOG.error("choose_agent failed: %s", e)
         return ""
 
 def generate_sub_queries(query: str, context):
@@ -634,14 +1133,15 @@ def generate_sub_queries(query: str, context):
         response = llm.send_message(combined)
         return response.text
     except Exception as e:
+        LOG.error("generate_sub_queries failed: %s", e)
         return []
 
 def gather_urls_for_subqueries(sub_queries: list, NO_OF_SOURCEURLS, headers=None, topic="general"):
     def fetch_urls_for_subquery(sub_query):
         return tavily_search(sub_query, headers, topic, NO_OF_SOURCEURLS)
     
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        results = list(executor.map(fetch_urls_for_subquery, sub_queries))
+    with concurrent.futures.ThreadPoolExecutor() as tpe:
+        results = list(tpe.map(fetch_urls_for_subquery, sub_queries))
     
     return {
         sub_query: [url["href"] for url in result]
@@ -676,8 +1176,8 @@ def process_subqueries_parallel(subquery_url_map):
             tasks.append((url, subquery))
     
     results = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_to_task = {executor.submit(process_url, url, subquery): (url, subquery) for url, subquery in tasks}
+    with concurrent.futures.ThreadPoolExecutor() as tpe:
+        future_to_task = {tpe.submit(process_url, url, subquery): (url, subquery) for url, subquery in tasks}
         for future in concurrent.futures.as_completed(future_to_task):
             url, subquery = future_to_task[future]
             try:
@@ -685,7 +1185,7 @@ def process_subqueries_parallel(subquery_url_map):
                 if res:
                     results.append(res)
             except Exception as e:
-                print(f"Error processing URL {url}: {e}")
+                LOG.error(f"Error processing URL {url}: {e}")
     return "".join(results)
 
 def generate_tokens(s, chunk_size=500):
@@ -758,11 +1258,12 @@ def llm_generate_report(agent_role_prompt, content_with_prompt):
             {"role": "user", "content": content_with_prompt},
         ]
         combined = ' '.join(f"{msg['role']}: {msg['content']}" for msg in messages)
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(llm.send_message, combined)
+        with concurrent.futures.ThreadPoolExecutor() as tpe:
+            future = tpe.submit(llm.send_message, combined)
             report = future.result()
         return report.text
     except Exception as e:
+        LOG.error("llm_generate_report failed: %s", e)
         return ""
 
 def research_conduct(query):
@@ -776,34 +1277,29 @@ def research_conduct(query):
     
     subquery_url_map = gather_urls_for_subqueries(sub_queries, NO_OF_SOURCEURLS)
     for subquery, urls in subquery_url_map.items():
-        print(f"Subquery: {subquery}")
+        LOG.info(f"Subquery: {subquery}")
         for idx, url in enumerate(urls, start=1):
-            print(f"  {idx}: {url}")
+            LOG.info(f"  {idx}: {url}")
     
     results = process_subqueries_parallel(subquery_url_map)
     content_with_prompt = generate_report_prompt(query, results, "str")
     report = llm_generate_report(role_prompt, content_with_prompt)
     return report
 
-# Research input model (keep separate to avoid collision with main InputData)
-class ResearchInput(BaseModel):
-    query: str
-
-# Research endpoint: mirrors the lambda handler provided in snippet
 @app.post("/research")
 async def research_endpoint(request: Request):
     try:
         payload = await request.json()
-        # Support string body or wrapped body
         if isinstance(payload, str):
             payload = json.loads(payload)
         input_data = ResearchInput(**payload)
         report = research_conduct(input_data.query)
         return {"response": report}
     except ValidationError as ve:
-        return HTTPException(status_code=422, detail=ve.json())
+        LOG.error("Validation error in /research: %s", ve)
+        raise HTTPException(status_code=422, detail=ve.json())
     except Exception as e:
         LOG.exception("Error in /research")
         raise HTTPException(status_code=500, detail="An error occurred in research workflow")
 
-# End of file
+# End of merged_app.py
