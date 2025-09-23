@@ -10,7 +10,7 @@ generation_config = {
     "response_mime_type": "text/plain",
 }
 llm = genai.GenerativeModel(
-    model_name="gemini-2.0-flash-exp",
+    model_name="models/gemini-2.5-flash-lite",
     generation_config=generation_config,
 )
 

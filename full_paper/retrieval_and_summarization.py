@@ -18,7 +18,7 @@ Note: This module intentionally uses lightweight heuristics (no heavy NLP
 libraries) so it runs in simple environments. It is intended as a stop-gap
 and can be swapped for model-based summarization later.
 """
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Callable, List, Dict, Tuple, Optional
 import re
 import math
 
@@ -53,6 +53,65 @@ def sentence_split(text: str) -> List[str]:
 # ----------------------
 # Minimal token estimator
 # ----------------------
+
+# In retrieval_and_summarization.py
+
+# ... (keep all existing functions like sentence_split, build_retrieval_objective, etc.)
+
+# --- Add this new function ---
+def generate_dense_evidence_summary_with_llm(
+    snippets: List[Dict],
+    objective: str,
+    # This function needs access to your Gemini caller
+    llm_caller: Callable[[str], Dict[str, Any]]
+) -> str:
+    """
+    Uses a powerful LLM to read multiple snippets and synthesize a single,
+    dense, fact-rich paragraph suitable for generating exam questions.
+
+    Args:
+      snippets: A list of retrieved snippet dictionaries, each with a 'text' key.
+      objective: The goal for the section (e.g., "Generate Hard LA questions...").
+      llm_caller: A function (like your `call_gemini`) that takes a prompt and returns a response dict.
+
+    Returns:
+      A single string containing the consolidated evidence.
+    """
+    if not snippets:
+        return "No relevant evidence was found for this section."
+
+    # Combine the text from all snippets
+    full_text = "\n\n---\n\n".join([s.get('text', '') for s in snippets])
+
+    # Create a specific prompt for the summarizer LLM
+    prompt = f"""
+    You are a subject matter expert tasked with preparing evidence for an exam paper generator.
+    Your goal is to consolidate the following text snippets into a single, dense, fact-rich paragraph.
+    Do not lose critical information, formulas, specific numbers, or key concepts.
+    The final output should be a clean paragraph of text, not a list or a summary.
+    This consolidated text will be used to create exam questions for the following objective: "{objective}"
+
+    Provided Snippets:
+    ---
+    {full_text}
+    ---
+
+    Consolidated Evidence Paragraph:
+    """
+
+    try:
+        # Use your existing LLM calling function
+        response = llm_caller(prompt)
+        consolidated_text = response.get("text", "")
+        # A simple cleanup
+        return consolidated_text.strip().replace("Consolidated Evidence Paragraph:", "").strip()
+    except Exception as e:
+        print(f"ERROR: LLM-based summarization failed: {e}")
+        # Fallback to a simpler concatenation if the LLM call fails
+        return " ".join([s.get('text', '') for s in snippets])[:2000] # Truncate to be safe
+
+
+
 
 def estimate_tokens_from_text(text: str) -> int:
     """Rough token estimate: tokens ≈ ceil(words * 1.3).
