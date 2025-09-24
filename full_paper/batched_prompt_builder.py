@@ -56,14 +56,15 @@ def build_generator_prompt_questions_only(
         "1) Produce the required number and types of questions exactly as specified in the planner."
     )
     s.append(
-        "2) CRITICAL: For questions with an internal choice (`is_choice: true`), the `q_text` key MUST be an array of objects. DO NOT add a separate string-based `q_text` key in the same question object, as this creates invalid JSON."
+        "2) CRITICAL: The `questions` key must be a JSON list. Each question in the list MUST be a separate, complete, and valid JSON object `{...}`. Ensure each object is properly separated by a comma."
     )
     s.append(
-        "3) Ensure all backslashes inside JSON strings are properly escaped (e.g., use `\\\\` for a literal backslash in LaTeX)."
+        "3) CRITICAL: For questions with an internal choice (`is_choice: true`), the `q_text` key MUST be an array of objects. DO NOT add a separate string-based `q_text` key in the same question object, as this creates invalid JSON."
     )
     s.append(
-        "4) Adhere strictly to the JSON schema. Do not add extra commentary, notes, or any text outside the final JSON object."
+        "4) Ensure all backslashes inside JSON strings are properly escaped (e.g., use `\\\\` for a literal backslash in LaTeX)."
     )
+    s.append("5) Return ONLY the JSON object and nothing else.") # Renumbered this
 
     s.append(
         "\nEXAMPLE QUESTION FORMATS (use these structures when required by the plan):"
@@ -94,44 +95,51 @@ def build_generator_prompt_questions_only(
 # Robust JSON extraction / parsing (NEWEST, MOST ROBUST VERSION)
 # ----------------------
 
-
 def _find_json_substring(text: str) -> str:
-    """
-    Finds the most likely JSON substring using a robust "greedy grab" method.
-    """
+    """Finds the most likely JSON substring using a robust "greedy grab" method."""
     text = text.strip()
     match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
     if match:
         return match.group(1).strip()
-
     start_brace = text.find("{")
-    start_bracket = text.find("[")
-
-    if start_brace == -1 and start_bracket == -1:
-        return text
-
-    start_pos = -1
-    if start_brace != -1 and start_bracket != -1:
-        start_pos = min(start_brace, start_bracket)
-    elif start_brace != -1:
-        start_pos = start_brace
-    else:
-        start_pos = start_bracket
-
+    if start_brace == -1:
+        raise ValueError("Could not find an opening brace '{' to start JSON parsing.")
     end_brace = text.rfind("}")
-    end_bracket = text.rfind("]")
+    if end_brace == -1:
+        raise ValueError("Could not find a closing brace '}' to end JSON parsing.")
+    return text[start_brace : end_brace + 1]
 
-    if end_brace == -1 and end_bracket == -1:
-        raise ValueError("Found an opening brace/bracket but no closing one.")
 
-    end_pos = max(end_brace, end_bracket)
 
-    if end_pos < start_pos:
-        raise ValueError(
-            "Mismatched brackets: last closing bracket/brace appears before the first opening one."
-        )
+def _repair_json_with_llm(broken_text: str) -> str:
+    """
+    Uses an LLM as a fallback to repair a severely malformed JSON string.
+    """
+    print("--- PARSER FALLBACK: Attempting to repair JSON with an LLM call. ---")
+    prompt = f"""
+    The following text is a broken JSON object from an AI. Your task is to analyze its structure, identify the separate question objects, and reconstruct it into a single, valid JSON object.
 
-    return text[start_pos : end_pos + 1]
+    - Fix any syntax errors, missing commas, or incorrect nesting.
+    - Ensure the `questions` key contains a list of well-formed question objects.
+    - Do NOT change any of the text content, IDs, or values. Only fix the JSON structure.
+    - CRITICAL: Your final output must ONLY be the repaired JSON object and nothing else. Do not wrap it in markdown or add explanations.
+
+    BROKEN JSON TEXT:
+    ```json
+    {broken_text}
+    ```
+
+    Repaired and valid JSON object:
+    """
+    try:
+        response = call_gemini(prompt, model_name="models/gemini-2.5-flash-lite", temperature=0.0)
+        repaired_text = response.get("text", "")
+        # A final cleanup to grab only the JSON part from the repair response
+        return _find_json_substring(repaired_text)
+    except Exception as e:
+        print(f"LLM Repair call failed: {e}")
+        # If the repair call itself fails, we re-raise the original problem
+        raise ValueError(f"The LLM-based JSON repair failed. Original text: {broken_text[:500]}")
 
 
 def _pre_repair_json_string(text: str) -> str:
@@ -153,8 +161,8 @@ def _pre_repair_json_string(text: str) -> str:
 
 def parse_generator_response(llm_text: str) -> Any:
     """
-    Parse LLM text output and return the JSON object. Applies a multi-layered
-    defense of pre-emptive repairs, non-strict parsing, and targeted post-repairs.
+    Parse LLM text output and return the JSON object. Now includes an LLM-powered
+    repair mechanism as a final fallback for severely malformed outputs.
     """
     if not llm_text or not llm_text.strip():
         raise ValueError("LLM output is empty or contains only whitespace.")
@@ -162,42 +170,46 @@ def parse_generator_response(llm_text: str) -> Any:
     try:
         candidate = _find_json_substring(llm_text)
     except ValueError as e:
-        raise ValueError(f"Failed to locate a potential JSON substring. Error: {e}")
+        raise ValueError(f"Failed to locate any potential JSON substring. Error: {e}")
 
-    # --- ATTEMPT 1: Pre-repair and non-strict parse ---
-    # This combination solves the vast majority of common LLM errors.
-    repaired_text = _pre_repair_json_string(candidate)
+    # --- ATTEMPT 1: Strict parse (for perfectly formed JSON) ---
     try:
-        # Use non-strict parsing to allow invalid control characters (e.g., unescaped backslashes in LaTeX)
-        return json.loads(repaired_text, strict=False)
-    except json.JSONDecodeError as e:
-        # --- ATTEMPT 2: Targeted structural repairs if the first attempt fails ---
-        original_error = e
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass # Continue to the next attempt
 
-        # REPAIR 1: Fix duplicate 'q_text' key in choice questions (a common structural error)
-        pattern = re.compile(
-            r'("q_text":\s*".*?",\s*)(?=[^\{]*?"is_choice":\s*true)', re.DOTALL
-        )
+    # --- ATTEMPT 2: Non-strict parse (for minor escape errors) ---
+    try:
+        return json.loads(candidate, strict=False)
+    except json.JSONDecodeError:
+        pass # Continue to the next attempt
+
+    # --- ATTEMPT 3: Regex-based repairs for common structural flaws ---
+    try:
+        repaired_text = candidate
+        # Fix duplicate 'q_text' key in choice questions
+        pattern = re.compile(r'("q_text":\s*".*?",\s*)(?=[^\{]*?"is_choice":\s*true)', re.DOTALL)
         repaired_text = pattern.sub("", repaired_text)
-
-        # REPAIR 2: Fix trailing commas (e.g., [1, 2, 3,])
+        # Fix trailing commas
         repaired_text = re.sub(r",\s*([\]\}])", r"\1", repaired_text)
-
-        # REPAIR 3: Fix double commas
+        # Fix double commas
         repaired_text = re.sub(r",\s*,", ",", repaired_text)
-
+        
+        return json.loads(repaired_text, strict=False)
+    
+    except json.JSONDecodeError as final_regular_error:
+        # --- FINAL ATTEMPT: Use LLM to repair the JSON ---
         try:
-            # Retry parsing with the structurally repaired text
-            return json.loads(repaired_text, strict=False)
-        except json.JSONDecodeError as final_error:
-            # If all attempts fail, raise a detailed error for debugging
-            raise ValueError(
-                f"Failed to parse JSON after all repair attempts.\n"
-                f"Original Error: {original_error}\n"
-                f"Final Error after repairs: {final_error}\n"
-                f"--- Snippet of final text attempted ---\n{repaired_text[:1000]}..."
+            repaired_by_llm = _repair_json_with_llm(candidate)
+            # We attempt one final, strict parse on the LLM's repaired output
+            return json.loads(repaired_by_llm)
+        except (json.JSONDecodeError, ValueError) as llm_repair_failure:
+             raise ValueError(
+                "Failed to parse JSON after all repair attempts, including an LLM-based fix.\n"
+                f"Original structural error: {final_regular_error}\n"
+                f"Final error after LLM repair: {llm_repair_failure}\n"
+                f"--- Snippet of final text attempted ---\n{candidate[:1000]}..."
             )
-
 
 # ----------------------
 # Safe generate wrapper (No changes needed)
