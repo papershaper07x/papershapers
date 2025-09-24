@@ -7,82 +7,142 @@ import os
 # --- Redis Connection (Best Practice for Railway Private Networking) ---
 
 # Railway injects these variables into your application container automatically.
-# The `REDISHOST` variable should resolve to the correct service name (e.g., 'redis').
+
+"""
+Environment-aware Redis cache helper.
+Behavior:
+ - Uses REDIS_URL if present (Railway or standard env).
+ - Otherwise builds a URL from REDISHOST/REDISPORT/REDISPASSWORD.
+ - Falls back to localhost Redis for dev.
+ - Exposes get_redis_connection(), create_cache_key(), get_from_cache(), set_to_cache().
+ - Safe: will disable caching (return None) if Redis is unreachable.
+"""
+
+from __future__ import annotations
+import os
+import json
+import time
+import logging
+from typing import Optional
+import redis
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# --- Configurable ---
+CACHE_EXPIRATION_SECONDS = int(os.getenv("CACHE_EXPIRATION_SECONDS", "3600"))
+REDIS_URL = os.getenv("REDIS_URL")  # preferred canonical url (e.g. set by Railway)
 REDISHOST = os.getenv("REDISHOST")
 REDISPORT = os.getenv("REDISPORT")
 REDISPASSWORD = os.getenv("REDISPASSWORD")
-REDISUSER = os.getenv("REDISUSER", "default") # The user is typically 'default'
+REDISUSER = os.getenv("REDISUSER", "default")
+# --- End config ---
 
-# The main `REDIS_URL` is also available, we'll use it for logging/fallback.
-RAILWAY_REDIS_URL = os.getenv("REDIS_URL")
+def _determine_connection_url() -> Optional[str]:
+    """Decide connection url using env vars, with sensible fallbacks."""
+    # 1) explicit canonical URL
+    if REDIS_URL:
+        logger.info("Using REDIS_URL from environment.")
+        return REDIS_URL
 
-# Initialize connection_url to None
-connection_url = None
+    # 2) try host/port/password combo (useful on Railway if REDIS_URL not set)
+    if REDISHOST and REDISPORT:
+        if REDISPASSWORD:
+            # Don't log the password itself
+            logger.info("Building Redis connection URL from REDISHOST/REDISPORT/REDISPASSWORD (hidden).")
+            return f"redis://{REDISUSER}:{REDISPASSWORD}@{REDISHOST}:{REDISPORT}"
+        else:
+            logger.info("Building Redis connection URL from REDISHOST/REDISPORT without password.")
+            return f"redis://{REDISHOST}:{REDISPORT}"
 
-if RAILWAY_REDIS_URL:
-    # We log this to see what Railway is providing us.
-    print(f"Railway provided REDIS_URL: {RAILWAY_REDIS_URL}")
+    # 3) local fallback for development
+    logger.info("No Redis env found. Falling back to local redis://localhost:6379/0 (dev).")
+    return "redis://localhost:6379/0"
 
-# **This is the critical part.**
-# We will manually build the connection URL from individual parts. This is the most
-# reliable method as it ensures we are using the service name from REDISHOST.
-if REDISHOST and REDISPORT and REDISPASSWORD:
-    print(f"Building Redis connection string from individual variables. Host: {REDISHOST}")
-    connection_url = f"redis://{REDISUSER}:{REDISPASSWORD}@{REDISHOST}:{REDISPORT}"
-else:
-    # This block is for LOCAL development (when Railway variables aren't present)
-    print("Railway Redis variables not found. Falling back to local Docker Redis.")
-    connection_url = "redis://localhost:6379"
 
-# Log the final connection address (hiding the password)
-safe_log_url = connection_url.split('@')[-1]
-print(f"Attempting to connect to Redis at: {safe_log_url}")
+_CONNECTION_URL = _determine_connection_url()
+_redis_pool: Optional[redis.ConnectionPool] = None
+_redis_client: Optional[redis.Redis] = None
+_cache_enabled = False
 
-# --- End of connection logic ---
+if _CONNECTION_URL:
+    try:
+        # create pool with sensible timeouts so failures are fast & recoverable
+        _redis_pool = redis.ConnectionPool.from_url(
+            _CONNECTION_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            health_check_interval=30
+        )
+        _redis_client = redis.Redis(connection_pool=_redis_pool)
+    except Exception as e:
+        logger.exception("Failed to create Redis connection pool: %s", e)
+        _redis_pool = None
+        _redis_client = None
 
-CACHE_EXPIRATION_SECONDS = 3600
+def _ping_redis(client: redis.Redis, retries: int = 3, backoff: float = 0.5) -> bool:
+    """Ping Redis with small retry/backoff. Returns True if reachable."""
+    for attempt in range(1, retries + 1):
+        try:
+            if client.ping():
+                logger.info("Redis ping successful.")
+                return True
+        except Exception as e:
+            logger.debug("Redis ping attempt %d failed: %s", attempt, e)
+        time.sleep(backoff * attempt)
+    logger.warning("Redis is not reachable after %d attempts.", retries)
+    return False
 
-try:
-    # Create the connection pool directly from the URL we constructed.
-    redis_pool = redis.ConnectionPool.from_url(connection_url, decode_responses=True)
-except Exception as e:
-    print(f"FATAL: Could not create Redis connection pool. Error: {e}")
-    redis_pool = None # Ensure pool is None if connection fails
+# Confirm connectivity at import time but do not raise if unavailable.
+if _redis_client:
+    try:
+        _cache_enabled = _ping_redis(_redis_client, retries=2, backoff=0.2)
+    except Exception:
+        _cache_enabled = False
 
-def get_redis_connection():
-    """Gets a Redis connection from the connection pool."""
-    if not redis_pool:
-        raise ConnectionError("Redis connection pool is not available or failed to initialize.")
-    return redis.Redis(connection_pool=redis_pool)
+if not _cache_enabled:
+    logger.warning("Caching disabled. Redis is not available or failed health check.")
 
+# Public API
+
+def get_redis_connection() -> redis.Redis:
+    """Return a Redis client. Raises ConnectionError if caching disabled."""
+    if not _cache_enabled or not _redis_client:
+        raise ConnectionError("Redis cache is not enabled or reachable.")
+    return _redis_client
 
 def create_cache_key(board: str, class_label: str, subject: str) -> str:
-    """Creates a consistent, unique key for a generation request."""
     board_safe = board.strip().lower().replace(" ", "_")
     class_safe = class_label.strip().lower().replace(" ", "_")
     subject_safe = subject.strip().lower().replace(" ", "_")
     return f"paper:{board_safe}:{class_safe}:{subject_safe}"
 
-def get_from_cache(key: str) -> dict | None:
-    """Retrieves and deserializes a JSON object from the Redis cache."""
+def get_from_cache(key: str) -> Optional[dict]:
+    if not _cache_enabled:
+        logger.debug("get_from_cache: cache disabled -> returning None for key %s", key)
+        return None
     try:
         r = get_redis_connection()
-        cached_result = r.get(key)
-        if cached_result:
-            print(f"CACHE HIT for key: {key}")
-            return json.loads(cached_result)
-        print(f"CACHE MISS for key: {key}")
+        raw = r.get(key)
+        if raw:
+            logger.info("CACHE HIT for key: %s", key)
+            return json.loads(raw)
+        logger.info("CACHE MISS for key: %s", key)
         return None
     except Exception as e:
-        print(f"CACHE ERROR: Could not read from cache. Key: {key}, Error: {e}")
+        logger.exception("CACHE ERROR (read) for key %s: %s", key, e)
         return None
 
-def set_to_cache(key: str, value: dict):
-    """Serializes a Python dict to JSON and stores it in the cache."""
+def set_to_cache(key: str, value: dict) -> bool:
+    if not _cache_enabled:
+        logger.debug("set_to_cache: cache disabled -> not setting key %s", key)
+        return False
     try:
         r = get_redis_connection()
-        json_value = json.dumps(value)
-        r.setex(key, CACHE_EXPIRATION_SECONDS, json_value)
-        print(f"CACHE SET for key: {key}")
+        r.setex(key, CACHE_EXPIRATION_SECONDS, json.dumps(value))
+        logger.info("CACHE SET for key: %s", key)
+        return True
     except Exception as e:
-        print(f"CACHE ERROR: Could not write to cache. Key: {key}, Error: {e}")
+        logger.exception("CACHE ERROR (write) for key %s: %s", key, e)
+        return False

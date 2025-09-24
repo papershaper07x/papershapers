@@ -110,19 +110,21 @@ def _find_json_substring(text: str) -> str:
     return text[start_brace : end_brace + 1]
 
 
-
-def _repair_json_with_llm(broken_text: str) -> str:
+def _repair_json_with_llm(broken_text: str, llm_caller: Callable) -> str:
     """
     Uses an LLM as a fallback to repair a severely malformed JSON string.
+    
+    Args:
+      broken_text: The malformed string that needs fixing.
+      llm_caller: The function to be used for making the LLM call (e.g., call_gemini).
     """
     print("--- PARSER FALLBACK: Attempting to repair JSON with an LLM call. ---")
     prompt = f"""
     The following text is a broken JSON object from an AI. Your task is to analyze its structure, identify the separate question objects, and reconstruct it into a single, valid JSON object.
-
-    - Fix any syntax errors, missing commas, or incorrect nesting.
-    - Ensure the `questions` key contains a list of well-formed question objects.
+    - Fix syntax errors, missing commas, duplicate keys, and incorrect nesting.
+    - Ensure the `questions` key contains a valid list of well-formed question objects `{{...}}`.
     - Do NOT change any of the text content, IDs, or values. Only fix the JSON structure.
-    - CRITICAL: Your final output must ONLY be the repaired JSON object and nothing else. Do not wrap it in markdown or add explanations.
+    - CRITICAL: Your final output must ONLY be the repaired JSON object. Do not add explanations or markdown.
 
     BROKEN JSON TEXT:
     ```json
@@ -132,37 +134,23 @@ def _repair_json_with_llm(broken_text: str) -> str:
     Repaired and valid JSON object:
     """
     try:
-        response = call_gemini(prompt, model_name="models/gemini-2.5-flash-lite", temperature=0.0)
+        # Use the provided llm_caller function
+        response = llm_caller(prompt, model_name="models/gemini-2.5-flash-lite", temperature=0.0)
         repaired_text = response.get("text", "")
-        # A final cleanup to grab only the JSON part from the repair response
         return _find_json_substring(repaired_text)
     except Exception as e:
         print(f"LLM Repair call failed: {e}")
-        # If the repair call itself fails, we re-raise the original problem
         raise ValueError(f"The LLM-based JSON repair failed. Original text: {broken_text[:500]}")
 
 
-def _pre_repair_json_string(text: str) -> str:
+def parse_generator_response(llm_text: str, llm_caller: Callable) -> Any:
     """
-    Applies simple, high-confidence repairs to a string before parsing.
-    """
-    # Remove single-line comments
-    text = re.sub(r"//.*", "", text)
-    # Remove multi-line comments
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    # Fix python-style booleans/none
-    text = (
-        text.replace(": True", ": true")
-        .replace(": False", ": false")
-        .replace(": None", ": null")
-    )
-    return text
-
-
-def parse_generator_response(llm_text: str) -> Any:
-    """
-    Parse LLM text output and return the JSON object. Now includes an LLM-powered
-    repair mechanism as a final fallback for severely malformed outputs.
+    Parse LLM text output and return the JSON object. Now requires an 'llm_caller'
+    to be passed for the LLM-powered repair mechanism.
+    
+    Args:
+      llm_text: The raw text output from the primary generator LLM.
+      llm_caller: The function to be used for the fallback repair call.
     """
     if not llm_text or not llm_text.strip():
         raise ValueError("LLM output is empty or contains only whitespace.")
@@ -172,45 +160,24 @@ def parse_generator_response(llm_text: str) -> Any:
     except ValueError as e:
         raise ValueError(f"Failed to locate any potential JSON substring. Error: {e}")
 
-    # --- ATTEMPT 1: Strict parse (for perfectly formed JSON) ---
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError:
-        pass # Continue to the next attempt
-
-    # --- ATTEMPT 2: Non-strict parse (for minor escape errors) ---
+    # Attempts to parse using standard methods first
     try:
         return json.loads(candidate, strict=False)
-    except json.JSONDecodeError:
-        pass # Continue to the next attempt
+    except json.JSONDecodeError as e:
+        final_regular_error = e
 
-    # --- ATTEMPT 3: Regex-based repairs for common structural flaws ---
+    # If standard parsing fails, fall back to the LLM repair function
     try:
-        repaired_text = candidate
-        # Fix duplicate 'q_text' key in choice questions
-        pattern = re.compile(r'("q_text":\s*".*?",\s*)(?=[^\{]*?"is_choice":\s*true)', re.DOTALL)
-        repaired_text = pattern.sub("", repaired_text)
-        # Fix trailing commas
-        repaired_text = re.sub(r",\s*([\]\}])", r"\1", repaired_text)
-        # Fix double commas
-        repaired_text = re.sub(r",\s*,", ",", repaired_text)
-        
-        return json.loads(repaired_text, strict=False)
-    
-    except json.JSONDecodeError as final_regular_error:
-        # --- FINAL ATTEMPT: Use LLM to repair the JSON ---
-        try:
-            repaired_by_llm = _repair_json_with_llm(candidate)
-            # We attempt one final, strict parse on the LLM's repaired output
-            return json.loads(repaired_by_llm)
-        except (json.JSONDecodeError, ValueError) as llm_repair_failure:
-             raise ValueError(
-                "Failed to parse JSON after all repair attempts, including an LLM-based fix.\n"
-                f"Original structural error: {final_regular_error}\n"
-                f"Final error after LLM repair: {llm_repair_failure}\n"
-                f"--- Snippet of final text attempted ---\n{candidate[:1000]}..."
-            )
-
+        repaired_by_llm = _repair_json_with_llm(candidate, llm_caller)
+        # Attempt one final, strict parse on the LLM's repaired output
+        return json.loads(repaired_by_llm)
+    except (json.JSONDecodeError, ValueError) as llm_repair_failure:
+        raise ValueError(
+            "Failed to parse JSON after all repair attempts, including an LLM-based fix.\n"
+            f"Original structural error: {final_regular_error}\n"
+            f"Final error after LLM repair: {llm_repair_failure}\n"
+            f"--- Snippet of final text attempted ---\n{candidate[:1000]}..."
+        )
 # ----------------------
 # Safe generate wrapper (No changes needed)
 # ----------------------
