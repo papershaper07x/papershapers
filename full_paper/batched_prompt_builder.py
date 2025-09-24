@@ -61,7 +61,9 @@ def build_generator_prompt_questions_only(
     s.append(
         "3) Ensure all backslashes inside JSON strings are properly escaped (e.g., use `\\\\` for a literal backslash in LaTeX)."
     )
-    s.append("4) Return ONLY the JSON object and nothing else.")
+    s.append(
+        "4) Adhere strictly to the JSON schema. Do not add extra commentary, notes, or any text outside the final JSON object."
+    )
 
     s.append(
         "\nEXAMPLE QUESTION FORMATS (use these structures when required by the plan):"
@@ -70,7 +72,7 @@ def build_generator_prompt_questions_only(
     if has_internal_choice:
         s.append(
             textwrap.dedent(
-                """
+                r"""
     - Question with Internal Choice (Correct Structure):
       {"section_id":"E","q_id":"E.1","type":"LA","marks":5,"difficulty":"Hard","is_choice":true,"q_text":[{"q_text":"Explain X.","sources":[...]},{"q_text":"[OR] Explain Y.","sources":[...]}]}
     """
@@ -106,7 +108,6 @@ def _find_json_substring(text: str) -> str:
     start_bracket = text.find("[")
 
     if start_brace == -1 and start_bracket == -1:
-        # If no JSON markers, maybe the whole string is the object (less likely but possible)
         return text
 
     start_pos = -1
@@ -133,62 +134,73 @@ def _find_json_substring(text: str) -> str:
     return text[start_pos : end_pos + 1]
 
 
+def _pre_repair_json_string(text: str) -> str:
+    """
+    Applies simple, high-confidence repairs to a string before parsing.
+    """
+    # Remove single-line comments
+    text = re.sub(r"//.*", "", text)
+    # Remove multi-line comments
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    # Fix python-style booleans/none
+    text = (
+        text.replace(": True", ": true")
+        .replace(": False", ": false")
+        .replace(": None", ": null")
+    )
+    return text
+
+
 def parse_generator_response(llm_text: str) -> Any:
     """
     Parse LLM text output and return the JSON object. Applies a multi-layered
-    defense of non-strict parsing and targeted repairs for common errors.
+    defense of pre-emptive repairs, non-strict parsing, and targeted post-repairs.
     """
     if not llm_text or not llm_text.strip():
-        raise ValueError("Empty LLM output")
+        raise ValueError("LLM output is empty or contains only whitespace.")
 
     try:
         candidate = _find_json_substring(llm_text)
     except ValueError as e:
-        raise ValueError(
-            f"Failed to locate any potential JSON substring. Original error: {e}"
-        )
+        raise ValueError(f"Failed to locate a potential JSON substring. Error: {e}")
 
+    # --- ATTEMPT 1: Pre-repair and non-strict parse ---
+    # This combination solves the vast majority of common LLM errors.
+    repaired_text = _pre_repair_json_string(candidate)
     try:
-        # Attempt 1: Strict parse (for perfectly formed JSON)
-        return json.loads(candidate)
-    except json.JSONDecodeError:
+        # Use non-strict parsing to allow invalid control characters (e.g., unescaped backslashes in LaTeX)
+        return json.loads(repaired_text, strict=False)
+    except json.JSONDecodeError as e:
+        # --- ATTEMPT 2: Targeted structural repairs if the first attempt fails ---
+        original_error = e
+
+        # REPAIR 1: Fix duplicate 'q_text' key in choice questions (a common structural error)
+        pattern = re.compile(
+            r'("q_text":\s*".*?",\s*)(?=[^\{]*?"is_choice":\s*true)', re.DOTALL
+        )
+        repaired_text = pattern.sub("", repaired_text)
+
+        # REPAIR 2: Fix trailing commas (e.g., [1, 2, 3,])
+        repaired_text = re.sub(r",\s*([\]\}])", r"\1", repaired_text)
+
+        # REPAIR 3: Fix double commas
+        repaired_text = re.sub(r",\s*,", ",", repaired_text)
+
         try:
-            # Attempt 2: Non-strict parse. This allows invalid control characters
-            # (like unescaped backslashes in LaTeX) and is the primary fix for the
-            # "Invalid \escape" error.
-            return json.loads(candidate, strict=False)
-        except json.JSONDecodeError as e:
-            # Attempt 3: If even non-strict parsing fails, it's likely a structural
-            # error. Apply our regex repairs and try one last time.
-            original_error = e
-            repaired_text = candidate
-
-            # REPAIR 1: Fix duplicate 'q_text' key in choice questions
-            pattern = re.compile(
-                r'("q_text":\s*".*?",\s*)(?=[^\{]*?"is_choice":\s*true)', re.DOTALL
+            # Retry parsing with the structurally repaired text
+            return json.loads(repaired_text, strict=False)
+        except json.JSONDecodeError as final_error:
+            # If all attempts fail, raise a detailed error for debugging
+            raise ValueError(
+                f"Failed to parse JSON after all repair attempts.\n"
+                f"Original Error: {original_error}\n"
+                f"Final Error after repairs: {final_error}\n"
+                f"--- Snippet of final text attempted ---\n{repaired_text[:1000]}..."
             )
-            repaired_text = pattern.sub("", repaired_text)
-
-            # REPAIR 2: Fix trailing commas
-            repaired_text = re.sub(r",\s*([\]\}])", r"\1", repaired_text)
-
-            # REPAIR 3: Fix double commas
-            repaired_text = re.sub(r",\s*,", ",", repaired_text)
-
-            try:
-                # Use strict=False again on the repaired text as a final safeguard
-                return json.loads(repaired_text, strict=False)
-            except json.JSONDecodeError as final_error:
-                raise ValueError(
-                    f"Failed to parse JSON after all repair attempts.\n"
-                    f"Original structural error: {original_error}\n"
-                    f"Final parsing error after repairs: {final_error}\n"
-                    f"--- Snippet of final text attempted ---\n{repaired_text[:1000]}..."
-                )
 
 
 # ----------------------
-# Safe generate wrapper
+# Safe generate wrapper (No changes needed)
 # ----------------------
 def safe_generate(
     callable_llm: Callable[[str], Dict[str, Any]],
@@ -221,7 +233,7 @@ def safe_generate(
 # ----------------------
 if __name__ == "__main__":
     # Test case with the invalid backslash error
-    latex_error_json = """
+    latex_error_json = r"""
     {
       "q_text": "The value of $\sin(\pi/2)$ is 1." 
     }
@@ -230,14 +242,14 @@ if __name__ == "__main__":
     try:
         parsed_data = parse_generator_response(latex_error_json)
         print("Successfully parsed JSON with invalid escape using `strict=False`!")
-        assert parsed_data["q_text"] == "The value of $\sin(\pi/2)$ is 1."
+        assert parsed_data["q_text"] == "The value of $\sin(\\pi/2)$ is 1."
         print("Assertion passed: Content is preserved correctly.")
     except ValueError as e:
         print("TEST FAILED: Could not parse the LaTeX JSON.")
         print(e)
 
     # Test case with both duplicate key AND invalid backslash
-    combined_error_json = """
+    combined_error_json = r"""
     ```json
     {
       "questions": [

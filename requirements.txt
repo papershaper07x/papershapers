@@ -10,3 +10,4 @@ numpy>=1.20
 pydantic>=1.8
 transformers
 pinecone
+redis==5.0.1 

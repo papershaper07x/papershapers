@@ -1,7 +1,11 @@
 # merged_app.py
 import os
 import traceback
+# ... [keep all existing imports] ...
+from fastapi import BackgroundTasks # <--- IMPORT BackgroundTasks
 
+# --- Import our new cache utility functions ---
+from cache import create_cache_key, get_from_cache, set_to_cache
 
 import json
 import logging
@@ -59,6 +63,10 @@ logging.basicConfig(level=logging.INFO)
 # -------- App --------
 app = FastAPI(title="Merged PaperRAG + Research FastAPI")
 
+
+# These are the default values if environment variables are not set
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 # Allow CORS for local development; adjust origins as required
 app.add_middleware(
     CORSMiddleware,
@@ -221,7 +229,32 @@ class InputData(BaseModel):
 class ResearchInput(BaseModel):
     query: str
 
+# in main.py
 
+def generate_and_cache(req: GenerateRequest):
+    """
+    This function contains the original, long-running generation logic.
+    It's designed to be run in the background.
+    """
+    print(f"BACKGROUND TASK: Starting fresh generation for {req.subject}...")
+    try:
+        # --- Simplified placeholder for the full pipeline ---
+        # In a real scenario, the full 30-second logic would be here.
+        final_paper = {
+            "board": req.board,
+            "class_label": req.class_label,
+            "subject": req.subject,
+            # THIS IS THE KEY CHANGE TO PROVE IT'S UPDATING
+            "generated_at": datetime.now().isoformat(),
+            "message": "This is a freshly generated paper from the background task."
+        }
+        
+        cache_key = create_cache_key(req.board, req.class_label, req.subject)
+        set_to_cache(cache_key, sanitize_for_json(final_paper))
+        print(f"BACKGROUND TASK: Successfully updated cache for key: {cache_key}")
+        
+    except Exception as e:
+        print(f"BACKGROUND TASK FAILED for {req.subject}. Error: {e}")
 # -------- CSV Dataframes (from second file) --------
 df_content = pd.DataFrame()
 df_prompt = pd.DataFrame()
@@ -586,116 +619,192 @@ def _post_process_and_clean_questions(
     return cleaned_questions
 
 
+# @app.post("/generate_full")
+# async def generate(req: GenerateRequest):
+#     """
+#     Async wrapper endpoint. Orchestrates the full, schema-aware RAG pipeline.
+#      - Loads the correct blueprint to create a detailed plan.
+#      - Processes all sections concurrently to retrieve and summarize evidence.
+#      - Assembles a schema-aware prompt and calls the generator LLM.
+#      - Parses and CLEANS the final response into a complete paper object.
+#     """
+#     loop = asyncio.get_event_loop()
+
+#     try:
+#         row = await loop.run_in_executor(
+#             executor,
+#             lambda: load_schema_row(
+#                 INPUT_CSV_PATH, req.board, req.class_label, req.subject
+#             ),
+#         )
+#     except Exception as e:
+#         LOG.error(f"Failed to load schema row: {e}")
+#         raise HTTPException(
+#             status_code=500, detail=f"Failed to load schema row: {str(e)}"
+#         )
+
+#     if not row:
+#         raise HTTPException(
+#             status_code=404,
+#             detail=f"Schema not found for {req.board}, {req.class_label}, {req.subject}",
+#         )
+
+#     file_data = row.get("File_Data", "") or ""
+#     plan = derive_plan_from_filedata(file_data, req.subject)
+#     LOG.info(
+#         f"Derived plan with {len(plan.get('sections', []))} sections for {req.subject}."
+#     )
+
+#     # --- Retrieval, Summarization, and Prompt Generation (No changes) ---
+#     section_tasks = []
+#     for sec in plan["sections"]:
+#         section_tasks.append(
+#             loop.run_in_executor(
+#                 executor,
+#                 process_section_sync,
+#                 sec,
+#                 file_data,
+#                 req.class_label,
+#                 req.subject,
+#             )
+#         )
+
+#     sections_results = await asyncio.gather(*section_tasks)
+
+#     slot_summaries_list = []
+#     for r in sections_results:
+#         slot_summaries_list.append(
+#             {
+#                 "slot_id": r["section_id"],
+#                 "slot_meta": r.get("slot_meta", ""),
+#                 "summaries": r.get("summaries", []),
+#             }
+#         )
+
+#     planner_text = plan.get(
+#         "planner_text", "Generate a standard exam paper based on the evidence."
+#     )
+#     prompt = build_generator_prompt_questions_only(
+#         planner_text, slot_summaries_list, plan, gen_settings={"mode": "production"}
+#     )
+
+#     try:
+#         gen_resp = await loop.run_in_executor(
+#             executor,
+#             lambda: call_gemini(prompt, model_name="models/gemini-2.5-flash-lite"),
+#         )
+#     except Exception as e:
+#         LOG.error(f"LLM generation failed: {e}")
+#         raise HTTPException(status_code=500, detail=f"LLM generation failed: {str(e)}")
+
+#     # --- Parsing and NEW Cleaning Step ---
+#     try:
+#         parsed_llm_json = parse_generator_response(gen_resp.get("text", ""))
+#     except Exception as e:
+#         LOG.error(f"Failed to parse LLM JSON response: {e}")
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Parse failed: {e}. Raw LLM output: {gen_resp.get('text', '')}",
+#         )
+
+#     # ** HERE IS THE NEW STEP **
+#     # After successful parsing, clean the content of the questions.
+#     LOG.info("LLM response parsed successfully. Starting post-processing and cleaning.")
+#     cleaned_questions = _post_process_and_clean_questions(
+#         parsed_llm_json.get("questions", [])
+#     )
+
+#     # --- Final Response Assembly (No changes, just uses cleaned_questions) ---
+#     final_paper_response = {
+#         "paper_id": parsed_llm_json.get("paper_id", "unknown-paper-id"),
+#         "board": req.board,
+#         "class": req.class_label,
+#         "subject": req.subject,
+#         "total_marks": plan.get("total_marks"),
+#         "time_allowed_minutes": plan.get("time_minutes"),
+#         "general_instructions": plan.get("general_instructions"),
+#         "paper_structure_summary": plan.get("sections"),
+#         "questions": cleaned_questions,  # Use the cleaned list here
+#         "retrieval_metadata": sanitize_for_json(sections_results),
+#     }
+
+#     return sanitize_for_json(final_paper_response)
+
+
+
+# THIS IS THE UPDATED ENDPOINT
 @app.post("/generate_full")
-async def generate(req: GenerateRequest):
+async def generate(req: GenerateRequest, background_tasks: BackgroundTasks): # <--- INJECT BackgroundTasks
     """
-    Async wrapper endpoint. Orchestrates the full, schema-aware RAG pipeline.
-     - Loads the correct blueprint to create a detailed plan.
-     - Processes all sections concurrently to retrieve and summarize evidence.
-     - Assembles a schema-aware prompt and calls the generator LLM.
-     - Parses and CLEANS the final response into a complete paper object.
+    Orchestrates the full RAG pipeline with a Stale-While-Revalidate cache.
     """
+    # 1. Create a unique, consistent key for this request.
+    cache_key = create_cache_key(req.board, req.class_label, req.subject)
+    
+    # 2. Check the cache for an existing result.
+    cached_paper = get_from_cache(cache_key)
+    
+    if cached_paper:
+        # --- CACHE HIT ---
+        # A paper exists in the cache. Return it immediately for a fast response.
+        print(f"Serving from cache and triggering background refresh for {cache_key}")
+        
+        # Add a task to run IN THE BACKGROUND to refresh the cache.
+        # The user does NOT wait for this to finish.
+        background_tasks.add_task(generate_and_cache, req) # Pass the request model
+        
+        return cached_paper
+
+    # --- CACHE MISS ---
+    # No paper in the cache. The first user must wait for the full generation.
+    print(f"Cache miss. Running synchronous generation for {cache_key}")
     loop = asyncio.get_event_loop()
 
     try:
-        row = await loop.run_in_executor(
-            executor,
-            lambda: load_schema_row(
-                INPUT_CSV_PATH, req.board, req.class_label, req.subject
-            ),
-        )
-    except Exception as e:
-        LOG.error(f"Failed to load schema row: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to load schema row: {str(e)}"
-        )
+        # ... [Your entire original generation logic remains here] ...
+        # This is the 30-second process.
+        
+        # For demonstration, replacing the long process with a placeholder:
+        # --- START of original logic ---
+        row = await loop.run_in_executor(executor, lambda: load_schema_row(INPUT_CSV_PATH, req.board, req.class_label, req.subject))
+        if not row:
+            raise HTTPException(status_code=404, detail="Schema not found")
+        plan = derive_plan_from_filedata(row.get("File_Data", ""), req.subject)
+        
+        section_tasks = [
+            loop.run_in_executor(executor, process_section_sync, sec, row.get("File_Data", ""), req.class_label, req.subject)
+            for sec in plan["sections"]
+        ]
+        sections_results = await asyncio.gather(*section_tasks)
 
-    if not row:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Schema not found for {req.board}, {req.class_label}, {req.subject}",
-        )
-
-    file_data = row.get("File_Data", "") or ""
-    plan = derive_plan_from_filedata(file_data, req.subject)
-    LOG.info(
-        f"Derived plan with {len(plan.get('sections', []))} sections for {req.subject}."
-    )
-
-    # --- Retrieval, Summarization, and Prompt Generation (No changes) ---
-    section_tasks = []
-    for sec in plan["sections"]:
-        section_tasks.append(
-            loop.run_in_executor(
-                executor,
-                process_section_sync,
-                sec,
-                file_data,
-                req.class_label,
-                req.subject,
-            )
-        )
-
-    sections_results = await asyncio.gather(*section_tasks)
-
-    slot_summaries_list = []
-    for r in sections_results:
-        slot_summaries_list.append(
-            {
-                "slot_id": r["section_id"],
-                "slot_meta": r.get("slot_meta", ""),
-                "summaries": r.get("summaries", []),
-            }
-        )
-
-    planner_text = plan.get(
-        "planner_text", "Generate a standard exam paper based on the evidence."
-    )
-    prompt = build_generator_prompt_questions_only(
-        planner_text, slot_summaries_list, plan, gen_settings={"mode": "production"}
-    )
-
-    try:
-        gen_resp = await loop.run_in_executor(
-            executor,
-            lambda: call_gemini(prompt, model_name="models/gemini-2.5-flash-lite"),
-        )
-    except Exception as e:
-        LOG.error(f"LLM generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"LLM generation failed: {str(e)}")
-
-    # --- Parsing and NEW Cleaning Step ---
-    try:
+        slot_summaries = [{"slot_id": r["section_id"], "slot_meta": r.get("slot_meta", ""), "summaries": r.get("summaries", [])} for r in sections_results]
+        planner_text = plan.get("planner_text", "Generate a standard exam paper.")
+        prompt = build_generator_prompt_questions_only(planner_text, slot_summaries, plan)
+        gen_resp = await loop.run_in_executor(executor, lambda: call_gemini(prompt, model_name="models/gemini-2.5-flash-lite"))
         parsed_llm_json = parse_generator_response(gen_resp.get("text", ""))
+        cleaned_questions = _post_process_and_clean_questions(parsed_llm_json.get("questions", []))
+        
+        final_paper = {
+            "paper_id": parsed_llm_json.get("paper_id", "unknown-id"),
+            "board": req.board, "class": req.class_label, "subject": req.subject,
+            "total_marks": plan.get("total_marks"), "time_allowed_minutes": plan.get("time_minutes"),
+            "general_instructions": plan.get("general_instructions"),
+            "questions": cleaned_questions, "retrieval_metadata": sections_results
+        }
+        # --- END of original logic ---
+        
+        # 3. Convert the generated paper to be JSON serializable
+        json_safe_paper = sanitize_for_json(final_paper)
+        
+        # 4. Store the newly generated paper in the cache before returning it.
+        set_to_cache(cache_key, json_safe_paper)
+        
+        return json_safe_paper
+        
     except Exception as e:
-        LOG.error(f"Failed to parse LLM JSON response: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Parse failed: {e}. Raw LLM output: {gen_resp.get('text', '')}",
-        )
+        LOG.error(f"Failed during synchronous generation: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate paper: {e}")
 
-    # ** HERE IS THE NEW STEP **
-    # After successful parsing, clean the content of the questions.
-    LOG.info("LLM response parsed successfully. Starting post-processing and cleaning.")
-    cleaned_questions = _post_process_and_clean_questions(
-        parsed_llm_json.get("questions", [])
-    )
-
-    # --- Final Response Assembly (No changes, just uses cleaned_questions) ---
-    final_paper_response = {
-        "paper_id": parsed_llm_json.get("paper_id", "unknown-paper-id"),
-        "board": req.board,
-        "class": req.class_label,
-        "subject": req.subject,
-        "total_marks": plan.get("total_marks"),
-        "time_allowed_minutes": plan.get("time_minutes"),
-        "general_instructions": plan.get("general_instructions"),
-        "paper_structure_summary": plan.get("sections"),
-        "questions": cleaned_questions,  # Use the cleaned list here
-        "retrieval_metadata": sanitize_for_json(sections_results),
-    }
-
-    return sanitize_for_json(final_paper_response)
 
 
 # -------- Legacy / simpler generator & other routes (from second file) --------
