@@ -19,12 +19,14 @@ not normalized, cosine similarities will still work but normalization is
 recommended for stable behaviour.
 
 """
+
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 
 # ----------------------
 # Utilities
 # ----------------------
+
 
 def _cosine_similarity_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Return cosine similarity matrix between rows of `a` and rows of `b`.
@@ -36,9 +38,11 @@ def _cosine_similarity_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     # If embeddings are normalized, dot product == cosine similarity
     return np.dot(a, b.T)
 
+
 # ----------------------
 # MMR implementation
 # ----------------------
+
 
 def mmr_rerank(
     query_emb: np.ndarray,
@@ -47,7 +51,7 @@ def mmr_rerank(
     top_k: int,
     diversity: float = 0.7,
     seed: Optional[int] = None,
-    return_scores: bool = False
+    return_scores: bool = False,
 ) -> Tuple[List[int], Optional[List[float]]]:
     """Select `top_k` candidate indices using Maximal Marginal Relevance (MMR).
 
@@ -114,9 +118,11 @@ def mmr_rerank(
         return selected, selected_scores
     return selected, None
 
+
 # ----------------------
 # Stratified sampling by metadata (chapter_weights)
 # ----------------------
+
 
 def stratified_sample_by_metadata(
     query_emb: np.ndarray,
@@ -126,7 +132,7 @@ def stratified_sample_by_metadata(
     chapter_weights: Dict[str, float],
     n_samples: int,
     diversity: float = 0.7,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
 ) -> List[int]:
     """Sample `n_samples` candidate indices stratified by `chapter_weights`.
 
@@ -176,7 +182,7 @@ def stratified_sample_by_metadata(
     # collect indices by chapter
     chapter_to_indices = {ch: [] for ch in chapters}
     for idx, md in enumerate(metadata):
-        ch = md.get('chapter') or md.get('chap') or md.get('chapter_name')
+        ch = md.get("chapter") or md.get("chap") or md.get("chapter_name")
         # normalize None -> str
         if ch is None:
             continue
@@ -204,7 +210,7 @@ def stratified_sample_by_metadata(
             top_k=pick_k,
             diversity=diversity,
             seed=seed,
-            return_scores=False
+            return_scores=False,
         )
         # map local picks to global indices
         for li in selected_local:
@@ -224,7 +230,7 @@ def stratified_sample_by_metadata(
                 top_k=pick_k,
                 diversity=diversity,
                 seed=seed,
-                return_scores=False
+                return_scores=False,
             )
             for p in picks:
                 selected_indices.append(remaining_pool[p])
@@ -232,9 +238,11 @@ def stratified_sample_by_metadata(
     # final truncation (in case of over-select)
     return selected_indices[:n_samples]
 
+
 # ----------------------
 # Convenience wrapper
 # ----------------------
+
 
 def mmr_and_stratified_sample(
     query_emb: np.ndarray,
@@ -244,7 +252,7 @@ def mmr_and_stratified_sample(
     n_samples: int,
     chapter_weights: Optional[Dict[str, float]] = None,
     diversity: float = 0.7,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
 ) -> List[int]:
     """Top-level helper: if chapter_weights provided, do stratified_sample_by_metadata,
     otherwise do global mmr_rerank to pick n_samples.
@@ -258,7 +266,7 @@ def mmr_and_stratified_sample(
             chapter_weights=chapter_weights,
             n_samples=n_samples,
             diversity=diversity,
-            seed=seed
+            seed=seed,
         )
     else:
         picks, _ = mmr_rerank(
@@ -268,7 +276,7 @@ def mmr_and_stratified_sample(
             top_k=n_samples,
             diversity=diversity,
             seed=seed,
-            return_scores=False
+            return_scores=False,
         )
         return picks
 
@@ -290,6 +298,14 @@ if __name__ == "__main__":
     metadata = [{"chapter": "Chap1" if i < 6 else "Chap2"} for i in range(10)]
     chapter_weights = {"Chap1": 60, "Chap2": 40}
 
-    picks = mmr_and_stratified_sample(query, cand_embs, candidates, metadata, n_samples=5, chapter_weights=chapter_weights, seed=123)
+    picks = mmr_and_stratified_sample(
+        query,
+        cand_embs,
+        candidates,
+        metadata,
+        n_samples=5,
+        chapter_weights=chapter_weights,
+        seed=123,
+    )
     print("Selected indices:", picks)
     print("Selected ids:", [candidates[i]["id"] for i in picks])

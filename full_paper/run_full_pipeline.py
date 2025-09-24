@@ -45,7 +45,7 @@ import google.generativeai as genai
 # helper modules you created
 from full_paper.mmr_and_sample import mmr_and_stratified_sample
 from full_paper.retrieval_and_summarization import build_retrieval_objective, summarize_and_budget_snippets
-from full_paper.batched_prompt_builder import  parse_generator_response, safe_generate,build_generator_prompt_questions_only
+from full_paper.batched_prompt_builder import  parse_generator_response,build_generator_prompt_questions_only
 # from full_paper.TRASH.grounding_check import grounding_check_answer
 
 # -------------------------
@@ -103,158 +103,6 @@ def load_schema_row(csv_path: str, board: str, class_label: str, subject: str) -
             return row.to_dict()
     # else return first candidate row
     return candidates.iloc[0].to_dict()
-
-# def derive_plan_from_filedata(file_data: str, default_total_marks: int = 80, default_time: int = 180) -> Dict[str, Any]:
-#     """
-#     Heuristic parser: attempts to find sections, marks, and question types from file_data text.
-#     Returns a planner dict with: total_marks, time_minutes, sections(list of dicts)
-#     The parser is intentionally conservative. When it cannot find details we fallback to a reasonable default.
-#     """
-#     text = (file_data or "").replace("\\r", "\n").replace("\\n", "\n")
-#     text = re.sub(r'\s+', ' ', text).strip()
-#     plan = {"total_marks": default_total_marks, "time_minutes": default_time, "sections": []}
-
-#     # quick search for explicit total marks or time
-#     tm = re.search(r'(total\s*marks?)[:\s]*([0-9]{2,3})', text, flags=re.IGNORECASE)
-#     if tm:
-#         plan['total_marks'] = int(tm.group(2))
-#     tt = re.search(r'(time\s*(in)?\s*minutes|duration)[:\s]*([0-9]{2,4})', text, flags=re.IGNORECASE)
-#     if tt:
-#         # group 3 may be present
-#         num = re.search(r'([0-9]{2,4})', tt.group(0))
-#         if num:
-#             plan['time_minutes'] = int(num.group(1))
-
-#     # look for sections by keywords
-#     # If file_data explicitly mentions MCQ / Objective / Short Answer / Long Answer, create sections
-#     lc = text.lower()
-#     sections = []
-#     if 'mcq' in lc or 'objective' in lc:
-#         sections.append({
-#             "section_id": "A",
-#             "title": "Objective",
-#             "marks_for_section": 20,
-#             "num_questions": 20,
-#             "question_type": "MCQ",
-#             "per_question_mark": 1,
-#             "difficulty_distribution": {"easy": 60, "medium":30, "hard":10}
-#         })
-#     if 'short answer' in lc or 'short answer' in text or 'short' in lc:
-#         sections.append({
-#             "section_id": "B",
-#             "title": "Short Answer",
-#             "marks_for_section": 30,
-#             "num_questions": 6,
-#             "question_type": "SA",
-#             "per_question_mark": 5,
-#             "difficulty_distribution": {"easy": 40, "medium":50, "hard":10}
-#         })
-#     if 'long answer' in lc or 'long' in lc or 'long answer' in text:
-#         sections.append({
-#             "section_id": "C",
-#             "title": "Long Answer",
-#             "marks_for_section": 30,
-#             "num_questions": 2,
-#             "question_type": "LA",
-#             "per_question_mark": 15,
-#             "difficulty_distribution": {"easy": 0, "medium":50, "hard":50}
-#         })
-
-#     # if parser didn't find any sections, create a reasonable default distribution
-#     if not sections:
-#         sections = [
-#             {"section_id":"A","title":"Objective","marks_for_section":20,"num_questions":20,"question_type":"MCQ","per_question_mark":1,"difficulty_distribution":{"easy":60,"medium":30,"hard":10}},
-#             {"section_id":"B","title":"Short Answer","marks_for_section":30,"num_questions":6,"question_type":"SA","per_question_mark":5,"difficulty_distribution":{"easy":40,"medium":50,"hard":10}},
-#             {"section_id":"C","title":"Long Answer","marks_for_section":30,"num_questions":2,"question_type":"LA","per_question_mark":15,"difficulty_distribution":{"easy":0,"medium":50,"hard":50}}
-#         ]
-#     plan['sections'] = sections
-#     return plan
-
-### REPLACEMENT CODE START for run_full_pipeline.py ###
-
-
-### REPLACEMENT CODE START for run_full_pipeline.py ###
-### FINAL PATCH for run_full_pipeline.py ###
-
-### FINAL REPLACEMENT for run_full_pipeline.py ###
-
-# import re
-
-# def derive_plan_from_filedata(file_data: str, subject: str, default_total_marks: int = 80, default_time: int = 180) -> Dict[str, Any]:
-#     """
-#     Final, robust planner that selects a known-good, hardcoded plan
-#     based on the subject to ensure maximum accuracy.
-#     """
-    
-#     # --- KNOWN-GOOD BLUEPRINT FOR PHYSICS ---
-#     correct_physics_12_plan = {
-#         "total_marks": 70, "time_minutes": 180,
-#         "general_instructions": (
-#             "- There are 33 questions in all. All questions are compulsory.\n"
-#             "- This question paper has five sections: Section A, Section B, Section C, Section D and Section E.\n"
-#             "- Section A contains sixteen questions, twelve MCQ and four assertion reasoning based of 1 mark each.\n"
-#             "- Section B contains five questions of two marks each.\n"
-#             "- Section C contains seven questions of three marks each.\n"
-#             "- Section D contains two case study-based questions of four marks each.\n"
-#             "- Section E contains three long answer questions of five marks each.\n"
-#             "- Internal choices are provided in specific questions.\n"
-#             "- Use of calculators is not allowed."
-#         ),
-#         "sections": [
-#             {"section_id":"A", "title": "Objective Type Questions", "num_questions":16, "internal_choices": 0, "question_breakdown": [{"type":"MCQ", "count": 12, "marks": 1}, {"type":"Assertion-Reason", "count": 4, "marks": 1}]},
-#             {"section_id":"B", "title": "Very Short Answer Questions", "num_questions":5, "internal_choices": 2, "question_breakdown": [{"type":"VSA", "count": 5, "marks": 2}]},
-#             {"section_id":"C", "title": "Short Answer Questions", "num_questions":7, "internal_choices": 1, "question_breakdown": [{"type":"SA", "count": 7, "marks": 3}]},
-#             {"section_id":"D", "title": "Case-Study Based Questions", "num_questions":2, "internal_choices": 2, "question_breakdown": [{"type":"Case-Study", "count": 2, "marks": 4}]},
-#             {"section_id":"E", "title": "Long Answer Questions", "num_questions":3, "internal_choices": 3, "question_breakdown": [{"type":"LA", "count": 3, "marks": 5}]}
-#         ]
-#     }
-    
-#     # --- NEW: KNOWN-GOOD BLUEPRINT FOR MATHS ---
-#     correct_maths_12_plan = {
-#         "total_marks": 80, "time_minutes": 180,
-#         "general_instructions": (
-#             "- This Question paper contains 38 questions. All questions are compulsory.\n"
-#             "- This Question paper is divided into five Sections - A, B, C, D and E.\n"
-#             "- Section A comprises of 20 questions of 1 mark each (18 MCQs and 2 Assertion-Reason).\n"
-#             "- Section B comprises of 5 questions of 2 marks each.\n"
-#             "- Section C comprises of 6 questions of 3 marks each.\n"
-#             "- Section D comprises of 4 questions of 5 marks each.\n"
-#             "- Section E comprises of 3 case study-based questions of 4 marks each.\n"
-#             "- Internal choices are provided in specific questions.\n"
-#             "- Use of calculator is not allowed."
-#         ),
-#         "sections": [
-#             {"section_id": "A", "title": "Objective Type Questions", "num_questions": 20, "internal_choices": 0, "question_breakdown": [{"type": "MCQ", "count": 18, "marks": 1}, {"type": "Assertion-Reason", "count": 2, "marks": 1}]},
-#             {"section_id": "B", "title": "Very Short Answer (VSA)", "num_questions": 5, "internal_choices": 2, "question_breakdown": [{"type": "VSA", "count": 5, "marks": 2}]},
-#             {"section_id": "C", "title": "Short Answer (SA)", "num_questions": 6, "internal_choices": 3, "question_breakdown": [{"type": "SA", "count": 6, "marks": 3}]},
-#             {"section_id": "D", "title": "Long Answer (LA)", "num_questions": 4, "internal_choices": 2, "question_breakdown": [{"type": "LA", "count": 4, "marks": 5}]},
-#             {"section_id": "E", "title": "Case Study-Based Questions", "num_questions": 3, "internal_choices": 3, "question_breakdown": [{"type": "Case-Study", "count": 3, "marks": 4}]}
-#         ]
-#     }
-
-#     plan = None
-#     # --- Select the correct plan based on the subject ---
-#     if "math" in subject.lower():
-#         plan = correct_maths_12_plan
-#         print("INFO: Using hardcoded plan for Class 12 Maths for maximum accuracy.")
-#     elif "physics" in subject.lower():
-#         plan = correct_physics_12_plan
-#         print("INFO: Using hardcoded plan for Class 12 Physics for maximum accuracy.")
-    
-#     # If no specific plan is found, fall back to a generic one (or the first available one)
-#     if not plan:
-#         plan = correct_physics_12_plan # Default fallback
-#         print(f"WARNING: No specific plan for subject '{subject}'. Falling back to default plan.")
-
-#     # Create the human-readable planner_text summary from the chosen plan
-#     planner_text = f"Paper Structure for {subject}: {plan['total_marks']} marks, {plan['time_minutes']} minutes. "
-#     for sec in plan['sections']:
-#         breakdown_str = ", ".join([f"{item['count']} {item['type']}({item['marks']}m)" for item in sec['question_breakdown']])
-#         planner_text += f"Sec {sec['section_id']}: {breakdown_str} ({sec.get('internal_choices', 0)} choices). "
-#     plan['planner_text'] = planner_text.strip()
-    
-#     return plan
-
 
 
 
@@ -383,53 +231,6 @@ def embed_texts_bge(texts: List[str], batch_size: int = 8) -> np.ndarray:
 
 
 tokenizer, model, device = load_bge()
-
-# -------------------------
-# Pinecone retrieval (BGE vectors)
-# # -------------------------
-# def retrieve_from_pinecone(objective_text: str, filters: Dict[str, Any], top_k: int = 20) -> List[Dict[str, Any]]:
-#     """
-#     Embed objective using BGE and query Pinecone index. Returns candidate dicts with embeddings.
-#     """
-#     if DRY_RUN:
-#         log("DRY_RUN: returning canned candidates.")
-#         return [
-#             {"snippet_id":"s1","text":"Photosynthesis is the process by which plants convert light into chemical energy in chloroplasts.","metadata":{"chapter":"Photosynthesis","source_id":"doc1"},"score":0.99,"embedding":None},
-#             {"snippet_id":"s2","text":"Transpiration occurs through stomata and helps in the movement of water.","metadata":{"chapter":"Transpiration","source_id":"doc2"},"score":0.95,"embedding":None}
-#         ]
-#     if not PINECONE_API_KEY:
-#         raise RuntimeError("PINECONE_API_KEY not set in environment.")
-
-#     # embed objective with BGE
-#     q_emb = embed_texts_bge([objective_text], batch_size=1)[0].tolist()
-
-#     pc = Pinecone(api_key=PINECONE_API_KEY)
-#     idx = pc.Index(PINECONE_INDEX_NAME)
-#     log("Querying Pinecone with BGE vector...")
-#     # ensure index created earlier: index = pinecone.Index(PINECONE_INDEX_NAME)
-#     # Request values + metadata so we don't need to re-embed snippets
-#     resp = idx.query(vector=q_emb, top_k=top_k, include_values=True, include_metadata=True, filter=filters)
-#     matches = resp.get('matches', []) or resp.get('results', [{}])[0].get('matches', [])
-
-#     results = []
-#     for m in matches:
-#         md = m.get('metadata', {}) or {}
-#         text = md.get('text') or md.get('text_preview') or md.get('content') or ""
-#         sid = m.get('id') or md.get('snippet_id') or None
-#         score = m.get('score', None)
-#         # we do NOT re-embed here; we'll request embedding if index returns values; else compute later.
-#         emb = None
-#         if isinstance(m, dict):
-#             if 'values' in m and m['values']:
-#                 emb = np.array(m['values'], dtype=float)
-#                 norm = np.linalg.norm(emb)
-#                 if norm > 0:
-#                     emb = emb / norm
-#         results.append({"snippet_id": sid or f"m{i}", "text": text, "metadata": md, "score": score, "embedding": emb})
-#     log(f"Pinecone returned {len(results)} matches.")
-#     return results
-
-# In run_full_pipeline.py
 
 
 
@@ -624,26 +425,7 @@ def run_pipeline(board: str, class_label: str, subject: str, chapters: Optional[
         log("Generator returned; parsing JSON...")
         parsed = parse_generator_response(gen_resp.get('text', ''))
 
-        # # grounding check using BGE embeddings (fast-ish)
-        # for q in parsed.get('questions', []):
-        #     src_ids = q.get('sources', [])
-        #     cited = []
-        #     for s_id in src_ids:
-        #         # search in selected snippets
-        #         for secs in selected_per_section.values():
-        #             for c in secs:
-        #                 if c.get('snippet_id') == s_id:
-        #                     cited.append(c)
-        #     # if cited empty, try to match by id in entire flattened selected list
-        #     if not cited:
-        #         flat = [item for sub in selected_per_section.values() for item in sub]
-        #         for c in flat:
-        #             if c.get('snippet_id') in src_ids:
-        #                 cited.append(c)
-        #     embed_fn = lambda texts: embed_texts_bge(texts, batch_size=4)
-        #     check = grounding_check_answer(q.get('answer',''), [{'snippet_id': c.get('snippet_id'), 'text': c.get('text')} for c in cited], embed_fn=embed_fn)
-        #     q['_grounding_check'] = check
-        #     log(f"Q {q.get('q_id')} needs_review={check['needs_review']} reasons={check['reasons']}")
+
 
         out_file = "last_generated_paper.json"
         with open(out_file, "w", encoding="utf-8") as f:
