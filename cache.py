@@ -1,8 +1,3 @@
-# cache.py
-
-import redis
-import json
-import os
 
 # --- Redis Connection (Best Practice for Railway Private Networking) ---
 
