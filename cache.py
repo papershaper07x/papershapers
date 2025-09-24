@@ -4,28 +4,37 @@ import redis
 import json
 import os
 
-# --- Redis Connection ---
-# These variable names (REDISHOST, REDISPORT, REDISPASSWORD) are provided
-# AUTOMATICALLY by Railway to your FastAPI service.
-REDIS_HOST = os.getenv("REDISHOST", "localhost")
-REDIS_PORT = int(os.getenv("REDISPORT", 6379))
-REDIS_PASSWORD = os.getenv("REDISPASSWORD", None) # <-- ADD THIS LINE
+# --- Redis Connection (Best Practice for Railway) ---
+
+# Railway injects the full connection URL as a single environment variable.
+# This is more robust than using separate host, port, and password variables.
+REDIS_CONNECTION_URL = os.getenv("REDIS_URL")
+
+# This is a fallback for local development with your Docker container.
+if not REDIS_CONNECTION_URL:
+    print("REDIS_URL not found, falling back to local Docker setup.")
+    REDIS_CONNECTION_URL = "redis://localhost:6379"
 
 CACHE_EXPIRATION_SECONDS = 3600
 
-# This creates a connection pool, which is more efficient for web apps.
-# We will now pass the password to the connection pool if it exists.
-redis_pool = redis.ConnectionPool(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD, # <-- ADD THIS LINE
-    db=0,
-    decode_responses=True
-)
+print(f"Connecting to Redis at: {REDIS_CONNECTION_URL.split('@')[-1]}") # Log without showing password
+
+try:
+    # Create the connection pool directly from the URL.
+    # This handles the host, port, user, and password all in one go.
+    redis_pool = redis.ConnectionPool.from_url(REDIS_CONNECTION_URL, decode_responses=True)
+except Exception as e:
+    print(f"FATAL: Could not create Redis connection pool. Error: {e}")
+    redis_pool = None # Ensure pool is None if connection fails
 
 def get_redis_connection():
     """Gets a Redis connection from the connection pool."""
+    if not redis_pool:
+        raise ConnectionError("Redis connection pool is not available.")
     return redis.Redis(connection_pool=redis_pool)
+
+# ... The rest of the file (create_cache_key, get_from_cache, set_to_cache)
+# remains exactly the same.
 
 # No other changes are needed in this file. The get/set functions will work correctly.
 
