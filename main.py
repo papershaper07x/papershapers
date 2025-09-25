@@ -833,11 +833,19 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=f"Failed to generate paper: {e}. Raw LLM Output: {raw_output}")
 # -------- Legacy / simpler generator & other routes (from second file) --------
 
-from cache import cache_status
+# in main.py (or wherever your FastAPI app is defined)
+from fastapi import FastAPI
+from cache import cache_status, clear_cache
+
+
 @app.get("/_debug/cache")
-def _debug_cache():
+def debug_cache():
     return cache_status()
 
+@app.post("/_debug/cache/clear")
+def debug_cache_clear():
+    clear_cache()
+    return {"ok": True}
 
 
 
