@@ -1,208 +1,288 @@
-# cache.py
-"""
-In-memory cache replacement for Redis-backed cache.
-- Thread-safe.
-- TTL-aware.
-- LRU eviction when item count exceeds MAX_ITEMS.
-- Background cleaner thread that purges expired keys.
-- Public API:
-    create_cache_key(board, class_label, subject) -> str
-    get_from_cache(key) -> Optional[dict]
-    set_to_cache(key, value) -> bool
-    cache_status() -> dict
-    clear_cache() -> None
-"""
-
+# cache.py (replace your current file with this)
 from __future__ import annotations
 import os
-import time
 import json
+import time
 import logging
+import ssl
 import threading
-from collections import OrderedDict
-from typing import Optional, Tuple, Dict, Any
+import urllib.parse
+from typing import Optional
+import redis
 
-logger = logging.getLogger("cache")
-if not logger.handlers:
-    # basic config if not already configured by app
-    logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# Configuration (override via environment variables)
-DEFAULT_TTL = int(os.getenv("CACHE_EXPIRATION_SECONDS", "3600"))  # 1 hour default
-MAX_ITEMS = int(os.getenv("INMEMORY_CACHE_MAX_ITEMS", "1000"))    # max number of cached keys
-CLEANER_INTERVAL = int(os.getenv("INMEMORY_CACHE_CLEANER_INTERVAL", "60"))  # seconds
+# --- Configurable ---
+CACHE_EXPIRATION_SECONDS = int(os.getenv("CACHE_EXPIRATION_SECONDS", "86400"))
+ENV_TRY_ORDER = [
+    "REDIS_URL",
+    "REDIS_TLS_URL",
+    "REDIS_INTERNAL_URL",
+    "RAILWAY_REDIS_URL",
+]
+REDISHOST = os.getenv("REDISHOST")
+REDISPORT = os.getenv("REDISPORT")
+REDISPASSWORD = os.getenv("REDISPASSWORD")
+REDISUSER = os.getenv("REDISUSER", None)
+REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "10"))
+REDIS_INSECURE_SKIP_VERIFY = os.getenv("REDIS_INSECURE_SKIP_VERIFY", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# End config
 
-# Internal structures
-# OrderedDict key -> (payload_json_str, expire_timestamp)
-_cache: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
-_lock = threading.RLock()
-_hits = 0
-_misses = 0
-_sets = 0
-_cleaner_thread: Optional[threading.Thread] = None
-_stop_cleaner = False
+# Internal state (lazy)
+_redis_pool: Optional[redis.ConnectionPool] = None
+_redis_client: Optional[redis.Redis] = None
+_last_connect_attempt = 0.0
+_connect_backoff_seconds = 2.0
+_max_retries_on_op = 3
+_connect_lock = threading.Lock()
 
-def _start_cleaner():
-    global _cleaner_thread, _stop_cleaner
-    if _cleaner_thread and _cleaner_thread.is_alive():
-        return
-    _stop_cleaner = False
-    def _cleaner():
-        logger.info("In-memory cache cleaner started (interval=%ds)", CLEANER_INTERVAL)
-        while not _stop_cleaner:
-            try:
-                time.sleep(CLEANER_INTERVAL)
-                now = time.time()
-                removed = []
-                with _lock:
-                    keys = list(_cache.keys())
-                    for k in keys:
-                        _, exp = _cache.get(k, (None, 0.0))
-                        if exp and exp <= now:
-                            _cache.pop(k, None)
-                            removed.append(k)
-                if removed:
-                    logger.debug("Cleaner removed expired keys: %s", removed)
-            except Exception as e:
-                logger.exception("Cache cleaner error: %s", e)
-        logger.info("In-memory cache cleaner stopped.")
-    _cleaner_thread = threading.Thread(target=_cleaner, name="InMemoryCacheCleaner", daemon=True)
-    _cleaner_thread.start()
 
-def _stop_cleaner_thread():
-    global _stop_cleaner, _cleaner_thread
-    _stop_cleaner = True
-    if _cleaner_thread:
-        _cleaner_thread.join(timeout=1.0)
-        _cleaner_thread = None
+def _mask_url(url: str) -> str:
+    try:
+        p = urllib.parse.urlparse(url)
+        userinfo = p.netloc
+        if "@" in userinfo:
+            masked = userinfo.split("@")[-1]  # host:port
+            return f"{p.scheme}://<hidden>@{masked}{p.path or ''}"
+        return url
+    except Exception:
+        return url
 
-# Start cleaner at import
-_start_cleaner()
+
+def _determine_connection_url() -> Optional[str]:
+    for name in ENV_TRY_ORDER:
+        val = os.getenv(name)
+        if val:
+            logger.info("Using %s from environment.", name)
+            return val
+
+    if REDISHOST and REDISPORT:
+        if REDISPASSWORD:
+            user = (REDISUSER + ":") if REDISUSER else ""
+            logger.info(
+                "Building Redis URL from REDISHOST/REDISPORT/REDISPASSWORD (hidden)."
+            )
+            return f"redis://{user}{REDISPASSWORD}@{REDISHOST}:{REDISPORT}"
+        else:
+            logger.info("Building Redis URL from REDISHOST/REDISPORT without password.")
+            return f"redis://{REDISHOST}:{REDISPORT}"
+
+    logger.info(
+        "No Redis environment found. Falling back to local redis://localhost:6379/0 (dev)."
+    )
+    return "redis://localhost:6379/0"
+
+
+def _is_tls_scheme(url: str) -> bool:
+    try:
+        scheme = urllib.parse.urlparse(url).scheme or ""
+        scheme = scheme.lower()
+        return scheme.startswith("rediss") or "ssl" in scheme
+    except Exception:
+        return False
+
+
+def _create_client_from_url(url: str) -> redis.Redis:
+    """
+    Build ConnectionPool/Redis client from the URL.
+    Tries to pass an SSLContext for TLS and falls back if the installed redis lib
+    doesn't accept ssl-related kwargs.
+    """
+    global _redis_pool
+
+    is_tls = _is_tls_scheme(url)
+
+    base_kwargs = {
+        "decode_responses": True,
+        "socket_connect_timeout": 5,
+        "socket_timeout": 5,
+        "health_check_interval": 30,
+        "max_connections": REDIS_MAX_CONNECTIONS,
+    }
+
+    # Build SSLContext if needed
+    ssl_ctx = None
+    if is_tls:
+        if REDIS_INSECURE_SKIP_VERIFY:
+            # INSECURE: testing only
+            ssl_ctx = ssl._create_unverified_context()
+        else:
+            ssl_ctx = ssl.create_default_context()
+
+    # Try constructing pool with SSLContext (robust against redis-py versions)
+    pool_kwargs = base_kwargs.copy()
+    if ssl_ctx is not None:
+        pool_kwargs["ssl"] = ssl_ctx
+
+    try:
+        pool = redis.ConnectionPool.from_url(url, **pool_kwargs)
+    except TypeError as te:
+        # Some redis versions might not accept 'ssl' or related kwargs via this path;
+        # retry without passing SSL kwargs (best-effort fallback).
+        logger.debug(
+            "ConnectionPool.from_url TypeError (retrying without ssl kwargs): %s", te
+        )
+        # remove ssl-related keys and retry
+        for k in ("ssl", "ssl_cert_reqs", "ssl_certfile", "ssl_keyfile", "ssl_ca_certs"):
+            pool_kwargs.pop(k, None)
+        pool = redis.ConnectionPool.from_url(url, **pool_kwargs)
+
+    # store pool in module state
+    _redis_pool = pool
+    return redis.Redis(connection_pool=pool)
+
+
+def _try_connect(force: bool = False) -> bool:
+    """
+    Lazily (re)create client. Returns True if reachable.
+    Uses backoff and a lock to avoid concurrent creation.
+    """
+    global _redis_client, _redis_pool, _last_connect_attempt
+
+    with _connect_lock:
+        now = time.time()
+        if not force and (now - _last_connect_attempt) < _connect_backoff_seconds:
+            return _redis_client is not None
+
+        _last_connect_attempt = now
+        url = _determine_connection_url()
+        if not url:
+            logger.warning("No Redis URL could be determined.")
+            return False
+
+        try:
+            logger.info("Attempting to connect to Redis at %s", _mask_url(url))
+            client = _create_client_from_url(url)
+            # quick ping with tiny retry
+            for i in range(2):
+                try:
+                    if client.ping():
+                        _redis_client = client
+                        logger.info("Redis ping successful.")
+                        return True
+                except Exception as e:
+                    logger.debug("Redis ping attempt %d failed: %s", i + 1, e)
+                    time.sleep(0.2 * (i + 1))
+        except Exception as e:
+            logger.exception("Failed to create redis client: %s", e)
+
+        logger.warning("Could not connect to Redis at startup/resolution.")
+        _redis_client = None
+        return False
+
+
+def get_redis_connection() -> redis.Redis:
+    """
+    Return a Redis client. Attempts lazy connect if client is None/unreachable.
+    Raises ConnectionError if unable to connect after retries.
+    """
+    global _redis_client
+
+    # quick check
+    if _redis_client:
+        try:
+            _redis_client.ping()
+            return _redis_client
+        except Exception:
+            logger.info("Existing redis client appears dead; trying to reconnect.")
+            _try_connect(force=True)
+
+    if not _redis_client:
+        ok = _try_connect(force=True)
+        if not ok:
+            raise ConnectionError(
+                "Redis cache is not enabled or reachable (lazy connect failed)."
+            )
+
+    try:
+        _redis_client.ping()
+        return _redis_client
+    except Exception as e:
+        logger.exception("Redis unreachable after connect: %s", e)
+        raise ConnectionError("Redis cache is not enabled or reachable.") from e
+
 
 def create_cache_key(board: str, class_label: str, subject: str) -> str:
-    """
-    Normalize and create a cache key.
-    """
     board_safe = board.strip().lower().replace(" ", "_")
     class_safe = class_label.strip().lower().replace(" ", "_")
     subject_safe = subject.strip().lower().replace(" ", "_")
     return f"paper:{board_safe}:{class_safe}:{subject_safe}"
 
-def _evict_if_needed():
-    """
-    Evict least-recently-used items until len(_cache) <= MAX_ITEMS.
-    """
-    while len(_cache) > MAX_ITEMS:
-        k, _ = _cache.popitem(last=False)
-        logger.debug("Evicted LRU cache key: %s", k)
 
 def get_from_cache(key: str) -> Optional[dict]:
-    """
-    Return the stored object (JSON-decoded) or None if not present/expired.
-    Does not raise on errors; logs exceptions and returns None.
-    """
-    global _hits, _misses
-    now = time.time()
     try:
-        with _lock:
-            item = _cache.get(key)
-            if not item:
-                _misses += 1
-                logger.debug("CACHE MISS (not found) for key: %s", key)
-                return None
-            payload_json, exp = item
-            if exp and exp <= now:
-                # expired
-                _cache.pop(key, None)
-                _misses += 1
-                logger.debug("CACHE MISS (expired) for key: %s", key)
-                return None
-            # Move to end to mark recent use (LRU)
-            _cache.move_to_end(key, last=True)
-            _hits += 1
-            try:
-                return json.loads(payload_json)
-            except Exception:
-                # in case the stored payload is not JSON, attempt eval fallback? no: return raw string wrapped
-                logger.exception("Failed to decode JSON value from cache for key %s", key)
-                return None
+        r = get_redis_connection()
     except Exception as e:
-        logger.exception("get_from_cache error for key %s: %s", key, e)
+        logger.debug("get_from_cache: redis not available: %s", e)
         return None
 
-def set_to_cache(key: str, value: dict, ttl: Optional[int] = None) -> bool:
-    """
-    Store value (dict) in cache with TTL seconds. Returns True on success.
-    """
-    global _sets
-    ttl = int(ttl) if ttl is not None else DEFAULT_TTL
-    exp = time.time() + ttl if ttl > 0 else None
-    try:
-        # JSON serialize to keep behavior consistent with external cache
-        payload_json = json.dumps(value)
-    except Exception as e:
-        logger.exception("Value not JSON serializable for key %s: %s", key, e)
+    for attempt in range(1, _max_retries_on_op + 1):
         try:
-            payload_json = json.dumps({"_cache_error_nonserializable": str(value)})
-        except Exception:
-            logger.exception("Failed to create fallback JSON for key %s", key)
-            return False
+            raw = r.get(key)
+            if raw:
+                logger.info("CACHE HIT for key: %s", key)
+                try:
+                    return json.loads(raw)
+                except Exception as e:
+                    logger.exception(
+                        "Failed to decode JSON from cache for key %s: %s", key, e
+                    )
+                    return None
+            logger.info("CACHE MISS for key: %s", key)
+            return None
+        except Exception as e:
+            logger.exception(
+                "Redis read error attempt %d for key %s: %s", attempt, key, e
+            )
+            time.sleep(0.2 * attempt)
+            _try_connect(force=True)
+    return None
 
+
+def set_to_cache(key: str, value: dict) -> bool:
     try:
-        with _lock:
-            _cache[key] = (payload_json, exp)
-            # mark as recently used
-            _cache.move_to_end(key, last=True)
-            _evict_if_needed()
-            _sets += 1
-        logger.debug("CACHE SET for key: %s (ttl=%s)", key, ttl)
-        return True
+        r = get_redis_connection()
     except Exception as e:
-        logger.exception("set_to_cache error for key %s: %s", key, e)
+        logger.debug("set_to_cache: redis not available: %s", e)
         return False
 
-def cache_status() -> Dict[str, Any]:
-    """
-    Return information about the in-memory cache for debugging/metrics.
-    """
-    with _lock:
-        now = time.time()
-        total = len(_cache)
-        # count expired
-        expired = sum(1 for (_, exp) in _cache.values() if exp and exp <= now)
-        keys_preview = list(_cache.keys())[-10:]  # last 10 most recent keys
-        return {
-            "backend": "in-memory",
-            "items": total,
-            "expired": expired,
-            "max_items": MAX_ITEMS,
-            "default_ttl": DEFAULT_TTL,
-            "hits": _hits,
-            "misses": _misses,
-            "sets": _sets,
-            "recent_keys": keys_preview,
-            "cleaner_interval": CLEANER_INTERVAL,
-        }
+    payload = None
+    try:
+        payload = json.dumps(value)
+    except Exception as e:
+        try:
+            payload = json.dumps({"_error_nonserializable": str(value)})
+            logger.warning("Value not JSON-serializable for key %s. Saving fallback.", key)
+        except Exception:
+            logger.exception(
+                "Failed to serialize cache value for key %s: %s", key, e
+            )
+            return False
 
-def clear_cache():
-    """
-    Clear all cached items.
-    """
-    with _lock:
-        _cache.clear()
-    logger.info("In-memory cache cleared.")
+    for attempt in range(1, _max_retries_on_op + 1):
+        try:
+            r.setex(key, CACHE_EXPIRATION_SECONDS, payload)
+            logger.info("CACHE SET for key: %s", key)
+            return True
+        except Exception as e:
+            logger.exception(
+                "Redis write error attempt %d for key %s: %s", attempt, key, e
+            )
+            time.sleep(0.2 * attempt)
+            _try_connect(force=True)
+    return False
 
-# For graceful shutdown hooks (if your app calls these)
-def shutdown():
-    _stop_cleaner_thread()
-    clear_cache()
 
-# Export only intended names
-__all__ = [
-    "create_cache_key",
-    "get_from_cache",
-    "set_to_cache",
-    "cache_status",
-    "clear_cache",
-    "shutdown",
-]
+def cache_status() -> dict:
+    url = _determine_connection_url()
+    connected = False
+    try:
+        connected = bool(_redis_client and _redis_client.ping())
+    except Exception:
+        connected = False
+    return {"resolved_url": _mask_url(url) if url else None, "connected": connected}
