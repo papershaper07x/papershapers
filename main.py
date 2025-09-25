@@ -833,6 +833,13 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=f"Failed to generate paper: {e}. Raw LLM Output: {raw_output}")
 # -------- Legacy / simpler generator & other routes (from second file) --------
 
+from cache import cache_status
+@app.get("/_debug/cache")
+def _debug_cache():
+    return cache_status()
+
+
+
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
