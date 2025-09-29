@@ -286,3 +286,124 @@ def cache_status() -> dict:
     except Exception:
         connected = False
     return {"resolved_url": _mask_url(url) if url else None, "connected": connected}
+
+
+# --- Versioned cache helpers (append to cache.py) ---
+import datetime
+from typing import Tuple, List
+
+# how many versions to keep per key
+CACHE_MAX_VERSIONS = int(os.getenv("CACHE_MAX_VERSIONS", "10"))
+# TTL default -> 30 days (monthly). Still configurable via env.
+CACHE_EXPIRATION_SECONDS = int(os.getenv("CACHE_EXPIRATION_SECONDS", str(30 * 24 * 3600)))
+
+def _versions_list_key(base_key: str) -> str:
+    return f"{base_key}:versions"
+
+def add_cache_version(base_key: str, value: dict, max_versions: int = CACHE_MAX_VERSIONS, ttl: int = CACHE_EXPIRATION_SECONDS) -> str:
+    """
+    Push a new version onto the Redis list for base_key.
+    Returns version_id (ms epoch string).
+    """
+    try:
+        r = get_redis_connection()
+    except Exception as e:
+        logger.debug("add_cache_version: redis not available: %s", e)
+        return ""
+
+    version_id = str(int(time.time() * 1000))
+    envelope = {
+        "version_id": version_id,
+        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "value": value,
+    }
+    payload = json.dumps(envelope)
+    list_key = _versions_list_key(base_key)
+
+    for attempt in range(1, _max_retries_on_op + 1):
+        try:
+            # newest at index 0
+            r.lpush(list_key, payload)
+            # keep only `max_versions` newest
+            r.ltrim(list_key, 0, max_versions - 1)
+            # set/update TTL on the versions list
+            r.expire(list_key, ttl)
+            logger.info("Added cache version %s to %s (kept %d versions)", version_id, list_key, max_versions)
+            return version_id
+        except Exception as e:
+            logger.exception("Redis write error attempt %d for key %s: %s", attempt, list_key, e)
+            time.sleep(0.2 * attempt)
+            _try_connect(force=True)
+    return ""
+
+def get_latest_cache_version(base_key: str) -> Optional[dict]:
+    """
+    Return the most recent envelope (dict) or None.
+    """
+    try:
+        r = get_redis_connection()
+    except Exception as e:
+        logger.debug("get_latest_cache_version: redis not available: %s", e)
+        return None
+
+    list_key = _versions_list_key(base_key)
+    try:
+        raw = r.lindex(list_key, 0)
+        if not raw:
+            logger.info("No versions found for key %s", base_key)
+            return None
+        return json.loads(raw)
+    except Exception as e:
+        logger.exception("Failed reading latest version for %s: %s", base_key, e)
+        return None
+
+def list_cache_versions(base_key: str) -> List[dict]:
+    """
+    Return metadata list for all versions (newest first).
+    Each list element is an envelope dict {"version_id","created_at","value"}.
+    By default we still return the value; caller may drop it if heavy.
+    """
+    try:
+        r = get_redis_connection()
+    except Exception as e:
+        logger.debug("list_cache_versions: redis not available: %s", e)
+        return []
+
+    list_key = _versions_list_key(base_key)
+    try:
+        raws = r.lrange(list_key, 0, -1)
+        return [json.loads(x) for x in raws if x]
+    except Exception as e:
+        logger.exception("Failed listing versions for %s: %s", base_key, e)
+        return []
+
+def get_cache_version_by_id(base_key: str, version_id: str) -> Optional[dict]:
+    """
+    Scan versions (small list) to find matching version_id.
+    Returns the envelope dict or None.
+    """
+    versions = list_cache_versions(base_key)
+    for env in versions:
+        if str(env.get("version_id")) == str(version_id):
+            return env
+    return None
+
+def get_cache_version_by_index(base_key: str, index: int) -> Optional[dict]:
+    """
+    Index 0 is newest. Accepts negative indexing similar to Python (optional).
+    """
+    try:
+        r = get_redis_connection()
+    except Exception as e:
+        logger.debug("get_cache_version_by_index: redis not available: %s", e)
+        return None
+
+    list_key = _versions_list_key(base_key)
+    try:
+        raw = r.lindex(list_key, index)
+        if not raw:
+            return None
+        return json.loads(raw)
+    except Exception as e:
+        logger.exception("Failed to get version at index %s for %s: %s", index, base_key, e)
+        return None

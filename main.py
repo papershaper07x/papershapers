@@ -5,7 +5,9 @@ import traceback
 from fastapi import BackgroundTasks # <--- IMPORT BackgroundTasks
 
 # --- Import our new cache utility functions ---
-from cache import create_cache_key, get_from_cache, set_to_cache
+from cache import create_cache_key, get_from_cache
+from cache import add_cache_version, get_latest_cache_version, get_cache_version_by_id, list_cache_versions
+
 from full_paper.run_full_pipeline import call_gemini
 
 import json
@@ -275,7 +277,8 @@ def generate_and_cache_background(req: GenerateRequest, executor: ThreadPoolExec
         cache_key = create_cache_key(req.board, req.class_label, req.subject)
         
         # ** THE GOAL: Update the cache with the new paper **
-        set_to_cache(cache_key, json_safe_paper)
+        version_id = add_cache_version(cache_key, json_safe_paper)
+        LOG.info("Added version %s for %s", version_id, cache_key)
         print(f"BACKGROUND TASK: Successfully updated cache for key: {cache_key}")
         
     except Exception as e:
@@ -765,53 +768,66 @@ def _post_process_and_clean_questions(
 
 
 @app.post("/generate_full")
-async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
+async def generate(req: GenerateRequest, background_tasks: BackgroundTasks, version_id: Optional[str] = None):
     """
     Orchestrates the full RAG pipeline with a Stale-While-Revalidate cache.
+    Backwards-compatible: falls back to legacy single-key cache if versions list empty,
+    and promotes that value into the versioned list.
     """
     loop = asyncio.get_event_loop()
     cache_key = create_cache_key(req.board, req.class_label, req.subject)
-    
-    # 1. Check the cache first
-    cached_paper = get_from_cache(cache_key)
-    
-    if cached_paper:
-        # --- CACHE HIT ---
-        print(f"Serving from cache and triggering background refresh for {cache_key}")
-        # Add the background task to re-generate and update the cache.
-        # The user does NOT wait for this.
-        background_tasks.add_task(generate_and_cache_background, req, executor)
-        # Return the stale (but instant) response.
-        return cached_paper
 
-    # --- CACHE MISS ---
-    # The user must wait this one time.
-    print(f"Cache miss. Running synchronous generation for {cache_key}")
+    # If client requested a specific version -> serve it
+    if version_id:
+        env = get_cache_version_by_id(cache_key, version_id)
+        if env:
+            return env
+        # else fallthrough to normal behavior
+
+    # 1) Try the versioned list first (new path)
+    latest_env = get_latest_cache_version(cache_key)
+    if latest_env:
+        LOG.info("Serving latest cached version %s for %s", latest_env.get("version_id"), cache_key)
+        background_tasks.add_task(generate_and_cache_background, req, executor)
+        return latest_env  # envelope: {"version_id","created_at","value"}
+
+    # 2) Compatibility: check legacy single-key cache (old behavior)
+    legacy = get_from_cache(cache_key)
+    if legacy:
+        LOG.info("Found legacy single-key cache for %s; promoting to versions list", cache_key)
+        # promote into versioned list (so subsequent reads hit versioned list)
+        promoted_version = add_cache_version(cache_key, legacy)
+        # return promoted envelope (keep shape consistent)
+        env = get_cache_version_by_id(cache_key, promoted_version)
+        # also trigger background refresh
+        background_tasks.add_task(generate_and_cache_background, req, executor)
+        return env if env else {"version_id": promoted_version, "created_at": None, "value": legacy}
+
+    # --- CACHE MISS (no versioned entry, no legacy entry) ---
+    LOG.info("Cache miss. Running synchronous generation for %s", cache_key)
     try:
-        # --- Run the entire generation pipeline ---
+        # --- Run the entire generation pipeline (unchanged) ---
         row = await loop.run_in_executor(executor, lambda: load_schema_row(INPUT_CSV_PATH, req.board, req.class_label, req.subject))
         if not row:
             raise HTTPException(status_code=404, detail="Schema not found")
 
         plan = derive_plan_from_filedata(row.get("File_Data", ""), req.subject)
-        
+
         section_tasks = [
             loop.run_in_executor(executor, process_section_sync, sec, row.get("File_Data", ""), req.class_label, req.subject)
             for sec in plan["sections"]
         ]
         sections_results = await asyncio.gather(*section_tasks)
-        
+
         slot_summaries = [{"slot_id": r["section_id"], "slot_meta": r.get("slot_meta", ""), "summaries": r.get("summaries", [])} for r in sections_results]
         planner_text = plan.get("planner_text", "Generate a standard exam paper.")
         prompt = build_generator_prompt_questions_only(planner_text, slot_summaries, plan)
-        
+
         gen_resp = await loop.run_in_executor(executor, lambda: call_gemini(prompt, model_name="models/gemini-2.5-flash-lite"))
-        
-        # Use the robust parser, passing the llm_caller it needs
+
         parsed_llm_json = parse_generator_response(gen_resp.get("text", ""), call_gemini)
-        
         cleaned_questions = _post_process_and_clean_questions(parsed_llm_json.get("questions", []))
-        
+
         final_paper = {
             "paper_id": parsed_llm_json.get("paper_id", "unknown-id"),
             "board": req.board, "class": req.class_label, "subject": req.subject,
@@ -819,19 +835,19 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             "general_instructions": plan.get("general_instructions"),
             "questions": cleaned_questions, "retrieval_metadata": sections_results
         }
-        
+
         json_safe_paper = sanitize_for_json(final_paper)
-        
-        # ** THE GOAL: Save the new paper to the cache before returning **
-        set_to_cache(cache_key, json_safe_paper)
-        
-        return json_safe_paper
-        
+
+        # ---- WRITE USING VERSIONED API (important) ----
+        version_id = add_cache_version(cache_key, json_safe_paper)
+        LOG.info("Synchronous generation saved as version %s for %s", version_id, cache_key)
+
+        return {"version_id": version_id, "created_at": datetime.utcnow().isoformat() + "Z", "value": json_safe_paper}
+
     except Exception as e:
         LOG.error(f"Failed during synchronous generation: {e}", exc_info=True)
         raw_output = locals().get("gen_resp", {}).get("text", "[Could not get raw text]")
         raise HTTPException(status_code=500, detail=f"Failed to generate paper: {e}. Raw LLM Output: {raw_output}")
-# -------- Legacy / simpler generator & other routes (from second file) --------
 
 
 
