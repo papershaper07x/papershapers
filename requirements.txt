@@ -11,3 +11,9 @@ pydantic>=1.8
 transformers
 pinecone
 redis==5.0.1 
+PyMuPDF==1.24.1
+pypdfium2==4.28.0
+python-docx==1.1.2 
+openpyxl==3.1.2 
+Pillow
+python-multipart
