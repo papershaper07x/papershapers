@@ -160,3 +160,69 @@ class TaskStatusResponse(BaseModel):
     """Defines the response for the task status endpoint."""
     task_id: str
     status: Any # Can be "processing", a dict with summaries, or an error dict
+
+
+
+
+# models.py
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from enum import Enum
+
+# ... (all existing models for Paper Generation, etc. remain unchanged)
+
+# --- UPDATED RESUME ANALYSIS MODELS ---
+# In models.py, replace the entire "RESUME ANALYSIS MODELS" section with this:
+
+# --- UPDATED RESUME ANALYSIS MODELS (to match frontend contract) ---
+
+class AnalysisType(str, Enum):
+    """Enumeration for the different types of resume analysis."""
+    GENERAL = "general"
+    DETAILED = "detailed"
+    SKILLS = "skills"
+    EXPERIENCE = "experience"
+
+# Nested models to represent the structured JSON data
+class ScoreModel(BaseModel):
+    overall: int = Field(..., description="Overall score from 0 to 100.")
+    skills: int = Field(..., description="Relevance and presentation of skills score.")
+    experience: int = Field(..., description="Impact and quality of work experience score.")
+    education: int = Field(..., description="Clarity and relevance of education score.")
+
+class PersonalInfoModel(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    location: Optional[str] = None # <-- ADDED
+
+class ExperienceModel(BaseModel):
+    position: str
+    company: str
+    duration: str
+    description: str # <-- ADDED
+
+class EducationModel(BaseModel):
+    degree: str
+    institution: str
+    year: str
+
+class RecommendationsModel(BaseModel):
+    strengths: List[str] = Field(..., description="List of key strengths.")
+    improvements: List[str] = Field(..., description="List of areas for improvement.")
+    suggestions: List[str] = Field(..., description="Actionable suggestions for the candidate.")
+
+class ResumeAnalysisData(BaseModel):
+    """The main data structure expected by the frontend component."""
+    score: ScoreModel
+    personalInfo: PersonalInfoModel
+    summary: str
+    skills: List[str]
+    experience: List[ExperienceModel]
+    education: List[EducationModel]
+    recommendations: RecommendationsModel
+
+class ResumeAnalysisResponse(BaseModel):
+    """The final top-level response for the API endpoint."""
+    success: bool = True
+    data: ResumeAnalysisData

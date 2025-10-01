@@ -17,3 +17,4 @@ python-docx==1.1.2
 openpyxl==3.1.2 
 Pillow
 python-multipart
+python-docx

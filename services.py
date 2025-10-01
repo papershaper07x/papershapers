@@ -13,7 +13,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from filelock import FileLock
-from fastapi import BackgroundTasks, HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, UploadFile, status
 import fitz
 # Third-party AI clients
 import google.generativeai as genai
@@ -828,3 +828,169 @@ def handle_get_task_status(task_id: str):
     if not status:
         raise HTTPException(status_code=404, detail="Task not found")
     return status
+
+
+
+
+
+
+# In services.py, add this new import at the top
+import json
+
+# ... (other imports)
+
+
+def _get_resume_analysis_prompt(analysis_type: models.AnalysisType) -> str:
+    """
+    Selects the expert-level system prompt that instructs the LLM to return a structured JSON object
+    that perfectly matches the frontend's data contract.
+    """
+    base_persona = (
+        "You are an expert career coach and professional resume reviewer acting as a data extraction API. "
+        "Your task is to analyze the provided resume text and return a single, valid JSON object. "
+        "Do NOT add any introductory text, explanations, or Markdown formatting like ```json. "
+        "Your entire output must be only the JSON object."
+    )
+
+    # This JSON structure now perfectly matches the frontend's TypeScript interfaces.
+    json_structure = """
+    {
+      "score": {
+        "overall": <integer, 0-100, a holistic score>,
+        "skills": <integer, 0-100, score for skills presentation and relevance>,
+        "experience": <integer, 0-100, score for impact and quality of experience section>,
+        "education": <integer, 0-100, score for clarity and relevance of education>
+      },
+      "personalInfo": {
+        "name": "<string, extracted name or null>",
+        "email": "<string, extracted email or null>",
+        "phone": "<string, extracted phone number or null>",
+        "location": "<string, extracted city/state or null>"
+      },
+      "summary": "<string, a 2-4 sentence professional summary based on the resume>",
+      "skills": ["<string, skill 1>", "<string, skill 2>", "..."],
+      "experience": [
+        {
+          "position": "<string, job title>",
+          "company": "<string, company name>",
+          "duration": "<string, e.g., 'Jan 2022 - Present'>",
+          "description": "<string, a 1-2 sentence summary of the role's key responsibilities and achievements>"
+        }
+      ],
+      "education": [
+        {
+          "degree": "<string, e.g., 'Bachelor of Science in Computer Science'>",
+          "institution": "<string, university name>",
+          "year": "<string, e.g., '2018 - 2022'>"
+        }
+      ],
+      "recommendations": {
+        "strengths": ["<string, a key strength of the resume>"],
+        "improvements": ["<string, a critical area for improvement>"],
+        "suggestions": ["<string, an actionable suggestion>"]
+      }
+    }
+    """
+    
+    focus_instruction = {
+        models.AnalysisType.GENERAL: "Provide a balanced, general analysis focusing on overall presentation and impact.",
+        models.AnalysisType.DETAILED: "Provide a detailed analysis, paying close attention to every section. Be critical in your scoring.",
+        models.AnalysisType.SKILLS: "Focus your analysis heavily on the skills section. Score the 'skills' field highest. Recommendations should be skills-focused.",
+        models.AnalysisType.EXPERIENCE: "Focus your analysis on the work experience section. Score the 'experience' field highest. Recommendations should be experience-focused."
+    }
+
+    task_prompt = focus_instruction.get(analysis_type)
+
+    return (
+        f"{base_persona}\n\n"
+        f"Analysis Focus: {task_prompt}\n\n"
+        f"Based on the resume text provided, populate the following JSON structure. Ensure all fields are filled accurately. "
+        f"If a piece of information is not present, use null for optional fields and empty arrays [] for lists.\n\n"
+        f"JSON Structure to populate:\n{json_structure}"
+    )
+
+
+async def handle_resume_analysis(file: UploadFile, analysis_type: models.AnalysisType):
+    """
+    Service handler for the resume analysis workflow, now returns a structured dictionary.
+    """
+    if file.size > config.MAX_RESUME_FILE_SIZE:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File size exceeds 10MB.")
+
+    try:
+        content = await file.read()
+        resume_text = utils.parse_document_to_text(content, file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    prompt = _get_resume_analysis_prompt(analysis_type)
+    full_prompt = f"{prompt}\n\n--- RESUME TEXT TO ANALYZE ---\n\n{resume_text}"
+
+    try:
+        log.info(f"Sending resume for '{analysis_type.value}' JSON analysis to Gemini.")
+        model = genai.GenerativeModel(config.RESUME_ANALYSIS_MODEL_NAME)
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            _executor, 
+            lambda: model.generate_content(full_prompt)
+        )
+        
+        # --- CRITICAL CHANGE: Parse the LLM's text response as JSON ---
+        try:
+            # Clean the response text to remove potential markdown backticks
+            cleaned_text = response.text.strip().replace("```json", "").replace("```", "")
+            analysis_json = json.loads(cleaned_text)
+            log.info("Successfully received and parsed JSON analysis from Gemini.")
+            return analysis_json
+        except json.JSONDecodeError:
+            log.error(f"Failed to parse JSON from Gemini response. Raw response: {response.text}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="AI model returned a malformed response. Please try again."
+            )
+
+    except Exception as e:
+        log.error(f"Error during Gemini API call for resume analysis: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="AI model failed to generate a response.")
+    """
+    Service handler for the entire resume analysis workflow.
+    """
+    # 1. Validate File Size
+    if file.size > config.MAX_RESUME_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File size exceeds the limit of {config.MAX_RESUME_FILE_SIZE / (1024*1024)}MB."
+        )
+
+    # 2. Read and Parse File Content
+    try:
+        content = await file.read()
+        resume_text = utils.parse_document_to_text(content, file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # 3. Get the Expert Prompt
+    prompt = _get_resume_analysis_prompt(analysis_type)
+    full_prompt = f"{prompt}\n\n--- RESUME TEXT TO ANALYZE ---\n\n{resume_text}"
+
+    # 4. Call the LLM for Analysis
+    try:
+        log.info(f"Sending resume for '{analysis_type.value}' analysis to Gemini.")
+        model = genai.GenerativeModel(config.RESUME_ANALYSIS_MODEL_NAME)
+        
+        # Run the blocking network call in the thread pool executor
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            _executor, 
+            lambda: model.generate_content(full_prompt)
+        )
+        
+        log.info("Successfully received analysis from Gemini.")
+        return response.text
+    except Exception as e:
+        log.error(f"Error during Gemini API call for resume analysis: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while analyzing the resume with the AI model."
+        )

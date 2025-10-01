@@ -2,7 +2,7 @@
 import json
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile, status
 from pydantic import ValidationError
 
 # --- New modular imports ---
@@ -179,3 +179,30 @@ async def get_task_status(task_id: str):
     """
     status_result = services.handle_get_task_status(task_id)
     return {"task_id": task_id, "status": status_result}
+
+
+
+
+# In endpoints.py
+
+
+@router.post(
+    "/analyze-resume/", 
+    response_model=models.ResumeAnalysisResponse, 
+    tags=["Resume Analysis"]
+)
+async def analyze_resume(
+    file: UploadFile = File(..., description="The resume file (.pdf, .docx, .txt)."),
+    analysis_type: models.AnalysisType = Form(
+        ..., 
+        alias="analysisType",  # <--- THIS IS THE FIX
+        description="The type of analysis to perform."
+    )
+):
+    """
+    Upload a resume and select an analysis type to receive instant,
+    AI-powered feedback in a structured JSON format.
+    """
+    analysis_result_dict = await services.handle_resume_analysis(file, analysis_type)
+    
+    return {"success": True, "data": analysis_result_dict}

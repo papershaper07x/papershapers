@@ -176,3 +176,46 @@ def parse_pdf(file_content: bytes, filename: str) -> Dict[str, Any]:
         LOG.error(f"Error parsing PDF '{filename}': {e}")
         # Re-raise the exception to be handled by the service layer
         raise ValueError(f"Error parsing PDF file: {filename}") from e
+
+
+
+
+# In utils.py, add these new imports at the top
+import os
+import io
+from docx import Document
+
+# In utils.py, add this new function, likely in the "Document Parsing Utilities" section
+
+def parse_document_to_text(file_content: bytes, filename: str) -> str:
+    """
+    Parses an uploaded document (PDF, DOCX, TXT) and extracts the raw text.
+    """
+    file_extension = os.path.splitext(filename)[1].lower()
+    text = ""
+    
+    LOG.info(f"Parsing document '{filename}' with extension '{file_extension}'.")
+
+    try:
+        if file_extension == ".pdf":
+            with fitz.open(stream=file_content, filetype="pdf") as pdf_doc:
+                for page in pdf_doc:
+                    text += page.get_text()
+        elif file_extension == ".docx":
+            doc = Document(io.BytesIO(file_content))
+            for para in doc.paragraphs:
+                text += para.text + "\n"
+        elif file_extension == ".txt":
+            # Decode with error handling
+            text = file_content.decode('utf-8', errors='ignore')
+        else:
+            raise ValueError(f"Unsupported file type for resume analysis: {file_extension}")
+        
+        if not text.strip():
+            raise ValueError("Could not extract any text from the document.")
+            
+        return text
+    except Exception as e:
+        LOG.error(f"Failed to parse document {filename}: {e}")
+        # Re-raise a user-friendly error to be caught by the service layer
+        raise ValueError(f"Could not read the content of the file '{filename}'. It may be corrupted or in an unsupported format.") from e

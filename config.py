@@ -103,3 +103,16 @@ EMBEDDING_MODEL_NAME = "models/text-embedding-004"
 # --- NEW ---
 # Multimodal model for the document processing endpoint
 DOCUMENT_PROCESSING_MODEL_NAME = "gemini-2.5-flash-lite"
+
+
+
+
+# =============================================================================
+# 6. Resume Analyzer Settings
+# =============================================================================
+
+# Maximum file size for resume uploads in bytes (10MB).
+MAX_RESUME_FILE_SIZE = 10 * 1024 * 1024
+
+# We'll use a more powerful model for this nuanced task. Gemini 1.5 Pro is a great choice.
+RESUME_ANALYSIS_MODEL_NAME = "gemini-2.5-flash-lite"
