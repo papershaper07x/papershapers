@@ -187,7 +187,7 @@ async def get_task_status(task_id: str):
 
 
 @router.post(
-    "/analyze-resume/", 
+    "/analyze-resume", 
     response_model=models.ResumeAnalysisResponse, 
     tags=["Resume Analysis"]
 )
