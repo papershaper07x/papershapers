@@ -7,7 +7,7 @@ import logging
 import ssl
 import threading
 import urllib.parse
-from typing import Optional
+from typing import Optional, Any, List, Dict
 import redis
 
 logger = logging.getLogger(__name__)

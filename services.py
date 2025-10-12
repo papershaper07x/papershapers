@@ -30,6 +30,8 @@ from cache import (
     get_cache_version_by_id,
 )
 import io
+import tempfile
+import shutil
 import zipfile
 from PIL import Image
 import pandas as pd
@@ -745,81 +747,174 @@ def _process_with_gemini(content: Any, task_type: str) -> str:
         raise Exception(f"Error with Google Gemini API: {e}")
 
 
-def _process_single_document(file_content: bytes, filename: str) -> str:
-    """Internal function: Processes one document and returns its summary."""
+def _process_single_document(file_content_or_path, filename: str) -> str:
+    """Internal function: Processes one document and returns its summary.
+
+    Accepts either bytes (file_content) or a path to the file on disk. If a
+    string path is provided, it will prefer streaming from disk to avoid extra
+    memory usage.
+    """
+    is_path = isinstance(file_content_or_path, str)
     file_extension = os.path.splitext(filename)[1].lower()
 
     if file_extension == ".pdf":
-        pdf_doc = fitz.open(stream=file_content, filetype="pdf")
-        if len(pdf_doc) > 10:
-            raise ValueError(f"PDF '{filename}' exceeds the 10-page limit.")
-        
-        parsed_content = utils.parse_pdf(file_content, filename)
+        # Use utils.parse_pdf which now supports file_path to avoid loading bytes
+        if is_path:
+            # quick page count check via fitz without loading full bytes
+            pdf_doc = fitz.open(file_content_or_path)
+            if len(pdf_doc) > 10:
+                raise ValueError(f"PDF '{filename}' exceeds the 10-page limit.")
+            parsed_content = utils.parse_pdf(file_path=file_content_or_path, filename=filename)
+        else:
+            pdf_doc = fitz.open(stream=file_content_or_path, filetype="pdf")
+            if len(pdf_doc) > 10:
+                raise ValueError(f"PDF '{filename}' exceeds the 10-page limit.")
+            parsed_content = utils.parse_pdf(file_content=file_content_or_path, filename=filename)
+
         if "text" in parsed_content:
             return _process_with_gemini(parsed_content["text"], "summarize_text")
         elif "images" in parsed_content:
             return _process_with_gemini(parsed_content["images"], "summarize_images")
+
     elif file_extension in [".jpg", ".jpeg", ".png"]:
-        image = Image.open(io.BytesIO(file_content))
+        if is_path:
+            image = Image.open(file_content_or_path)
+        else:
+            image = Image.open(io.BytesIO(file_content_or_path))
         return _process_with_gemini(image, "alt_text")
+
     elif file_extension == ".docx":
-        doc = Document(io.BytesIO(file_content))
+        if is_path:
+            doc = Document(file_content_or_path)
+        else:
+            doc = Document(io.BytesIO(file_content_or_path))
         text = "\n".join([para.text for para in doc.paragraphs])
         return _process_with_gemini(text, "summarize_text")
+
     elif file_extension in [".xls", ".xlsx"]:
-        df = pd.read_excel(io.BytesIO(file_content))
+        if is_path:
+            df = pd.read_excel(file_content_or_path)
+        else:
+            df = pd.read_excel(io.BytesIO(file_content_or_path))
         return _process_with_gemini(df.to_string(), "summarize_text")
+
     else:
         return f"Unsupported file type: {filename}"
 
 
 def _process_file_background(file_content: bytes, filename: str, task_id: str):
-    """The main background worker function for processing files."""
+    """Deprecated: keep for backwards compatibility. Prefer file-path based worker.
+
+    This function accepts bytes and delegates to the path-based worker by
+    writing the bytes to a temporary file and invoking that worker. That keeps
+    behavior unchanged but avoids retaining bytes in long-lived memory.
+    """
+    tmp = None
+    try:
+        suffix = os.path.splitext(filename)[1] if getattr(filename, "__str__", None) else None
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(file_content)
+        tmp.flush()
+        tmp.close()
+        _process_file_background_from_path(tmp.name, filename, task_id)
+    finally:
+        try:
+            if tmp and os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+        except Exception:
+            pass
+
+
+def _process_file_background_from_path(file_path: str, filename: str, task_id: str):
+    """Background worker entrypoint which reads from a file on disk instead of
+    accepting bytes. This prevents keeping large uploads in memory.
+    The function delegates to the existing processing functions and removes
+    temporary files when finished.
+    """
     try:
         file_extension = os.path.splitext(filename)[1].lower()
 
         if file_extension == ".zip":
             all_summaries = []
-            with zipfile.ZipFile(io.BytesIO(file_content)) as zf:
+            with zipfile.ZipFile(file_path) as zf:
                 valid_files = [f for f in zf.infolist() if not f.is_dir() and not f.filename.startswith('__MACOSX/')]
-                
+
                 if len(valid_files) > 5:
                     raise ValueError(f"ZIP archive exceeds the 5-file limit.")
-                
+
                 for file_info in valid_files:
+                    member_tmp_name = None
                     try:
-                        summary = _process_single_document(zf.read(file_info.filename), file_info.filename)
+                        with zf.open(file_info) as member_f:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file_info.filename)[1]) as member_tmp:
+                                shutil.copyfileobj(member_f, member_tmp)
+                                member_tmp_name = member_tmp.name
+
+                        summary = _process_single_document(member_tmp_name, file_info.filename)
                         all_summaries.append({"filename": file_info.filename, "summary": summary})
                     except Exception as doc_error:
                         log.error(f"Error processing {file_info.filename} in zip: {doc_error}")
                         all_summaries.append({"filename": file_info.filename, "summary": f"Could not process. Error: {doc_error}"})
-            
+                    finally:
+                        try:
+                            if member_tmp_name and os.path.exists(member_tmp_name):
+                                os.unlink(member_tmp_name)
+                        except Exception:
+                            pass
+
             background_task_status[task_id] = {"summaries": all_summaries}
         else:
-            summary = _process_single_document(file_content, filename)
+            summary = _process_single_document(file_path, filename)
             background_task_status[task_id] = {"summaries": [{"filename": filename, "summary": summary}]}
 
     except ValueError as ve:
-        # Custom handling for user-facing limit errors
         if "exceeds" in str(ve) and "limit" in str(ve):
-             background_task_status[task_id] = {"requires_payment": True, "reason": str(ve)}
+            background_task_status[task_id] = {"requires_payment": True, "reason": str(ve)}
         else:
-             background_task_status[task_id] = {"error": str(ve)}
+            background_task_status[task_id] = {"error": str(ve)}
     except Exception as e:
         log.error(f"Error processing file in background for task {task_id}: {e}")
         background_task_status[task_id] = {"error": str(e)}
+    finally:
+        # Cleanup the uploaded file (if it's a temp file path)
+        try:
+            if os.path.exists(file_path):
+                os.unlink(file_path)
+        except Exception:
+            pass
 
 
 # --- Handler functions to be called by endpoints ---
 
 async def handle_upload_and_process(background_tasks: BackgroundTasks, file: Any):
     """Service handler for creating and dispatching a document processing task."""
-    file_content = await file.read()
-    task_id = f"task_{file.filename}_{os.urandom(4).hex()}"
-    background_task_status[task_id] = "processing"
+    # Stream uploaded file to a temporary file to avoid holding its bytes in memory.
+    suffix = os.path.splitext(file.filename)[1] if getattr(file, "filename", None) else None
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        await file.seek(0)
+        while True:
+            chunk = await file.read(65536)
+            if not chunk:
+                break
+            tmp.write(chunk)
+        tmp.flush()
+        tmp.close()
 
-    background_tasks.add_task(_process_file_background, file_content, file.filename, task_id)
-    return task_id
+        task_id = f"task_{file.filename}_{os.urandom(4).hex()}"
+        background_task_status[task_id] = "processing"
+
+        # Schedule the path-based worker which will remove the temp file when done
+        background_tasks.add_task(_process_file_background_from_path, tmp.name, file.filename, task_id)
+        return task_id
+    except Exception:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        if os.path.exists(tmp.name):
+            os.unlink(tmp.name)
+        raise
 
 
 def handle_get_task_status(task_id: str):
@@ -918,8 +1013,26 @@ async def handle_resume_analysis(file: UploadFile, analysis_type: models.Analysi
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File size exceeds 10MB.")
 
     try:
-        content = await file.read()
-        resume_text = utils.parse_document_to_text(content, file.filename)
+        # Stream upload to temp file to avoid holding all bytes in memory
+        suffix = os.path.splitext(file.filename)[1] if getattr(file, "filename", None) else None
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        try:
+            await file.seek(0)
+            while True:
+                chunk = await file.read(65536)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+            tmp.flush()
+            tmp.close()
+
+            resume_text = utils.parse_document_to_text(file_path=tmp.name, filename=file.filename)
+        finally:
+            try:
+                if tmp and os.path.exists(tmp.name):
+                    os.unlink(tmp.name)
+            except Exception:
+                pass
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -965,8 +1078,25 @@ async def handle_resume_analysis(file: UploadFile, analysis_type: models.Analysi
 
     # 2. Read and Parse File Content
     try:
-        content = await file.read()
-        resume_text = utils.parse_document_to_text(content, file.filename)
+        suffix = os.path.splitext(file.filename)[1] if getattr(file, "filename", None) else None
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        try:
+            await file.seek(0)
+            while True:
+                chunk = await file.read(65536)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+            tmp.flush()
+            tmp.close()
+
+            resume_text = utils.parse_document_to_text(file_path=tmp.name, filename=file.filename)
+        finally:
+            try:
+                if tmp and os.path.exists(tmp.name):
+                    os.unlink(tmp.name)
+            except Exception:
+                pass
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
