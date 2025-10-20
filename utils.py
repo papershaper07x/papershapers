@@ -9,7 +9,6 @@ import numpy as np
 # --- NEW IMPORTS for PDF parsing ---
 import fitz  # PyMuPDF
 import pypdfium2 as pdfium
-from PIL import Image
 # --- END NEW IMPORTS ---
 
 LOG = logging.getLogger("uvicorn.error")

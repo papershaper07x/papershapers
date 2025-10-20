@@ -16,7 +16,6 @@ from endpoints import router as api_router
 import services
 # Import the config module for application settings
 import config
-from logger import log  # <--- IMPORT FROM THE NEW FILE
 
 # -------- Logging --------
 # Set up the logger, which will be used across the application
